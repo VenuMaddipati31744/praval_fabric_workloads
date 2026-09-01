@@ -16,6 +16,11 @@ import { buildMigrationPlan } from "./mapping/topology";
 import { stripSqlComments } from "./mapping/queryMap";
 import { buildCreateEventstreamRequest, toBase64 } from "./emit/ItemPayload";
 import { isAsyncOperation } from "./execute/asyncOperation";
+import {
+  normalizeParameterName,
+  pickDefaultConnectionType,
+  prefillConnectionParameter
+} from "./mapping/connectionPrefill";
 import { MigrationAssessment } from "./assess/Assessment";
 import {
   blobToSqlJob,
@@ -209,6 +214,52 @@ console.log("\n== create-item response narrowing ==");
   check("null is not an operation", !isAsyncOperation(null));
   check("undefined is not an operation", !isAsyncOperation(undefined));
   check("empty object is not an operation", !isAsyncOperation({}));
+}
+
+console.log("\n== connection prefill ==");
+{
+  const ehInput = eventHubToKustoJob.properties.inputs[0];
+  const iotInput = commentedUdfJob.properties.inputs[0];
+
+  // Fabric parameter names vary per connector, so matching is alias-based.
+  check(
+    "endpoint gets the namespace FQDN",
+    prefillConnectionParameter("endpoint", ehInput) === "contoso-ns.servicebus.windows.net",
+    prefillConnectionParameter("endpoint", ehInput)
+  );
+  check(
+    "entityPath gets the event hub name",
+    prefillConnectionParameter("entityPath", ehInput) === "telemetry"
+  );
+  check(
+    "alias spelling still matches",
+    prefillConnectionParameter("Entity_Path", ehInput) === "telemetry"
+  );
+  check(
+    "consumer group carried over",
+    prefillConnectionParameter("consumerGroupName", ehInput) === "$Default"
+  );
+  check(
+    "iot hub namespace resolves too",
+    prefillConnectionParameter("endpoint", iotInput) === "hub.servicebus.windows.net",
+    prefillConnectionParameter("endpoint", iotInput)
+  );
+  check(
+    "unknown parameter yields empty, not a guess",
+    prefillConnectionParameter("somethingElse", ehInput) === ""
+  );
+  check("missing input yields empty", prefillConnectionParameter("endpoint", undefined) === "");
+  check("normalization strips separators", normalizeParameterName("Entity_Path") === "entitypath");
+
+  // The service is authoritative; we only preselect when it offers a match.
+  check(
+    "event hub type preselected from service list",
+    pickDefaultConnectionType("AzureEventHub", ["SQL", "EventHub"]) === "EventHub"
+  );
+  check(
+    "no preselection when nothing matches",
+    pickDefaultConnectionType("AzureEventHub", ["SQL", "Snowflake"]) === ""
+  );
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed`);

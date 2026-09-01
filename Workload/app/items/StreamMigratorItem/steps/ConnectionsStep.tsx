@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  Button,
   Dropdown,
   Field,
   MessageBar,
@@ -15,14 +16,16 @@ import { ConnectionClient } from "../../../clients/ConnectionClient";
 import { Connection } from "../../../clients/FabricPlatformTypes";
 import { buildMigrationPlan } from "../migration";
 import { asMigratorContext } from "./WizardContext";
+import { CreateConnectionDialog } from "./CreateConnectionDialog";
 
 /**
  * Step 3: bind each mapped ASA input to a Fabric connection.
  *
  * ARM never returns Stream Analytics secrets, so credentials cannot be carried
- * over. The user selects an existing Fabric connection, or creates one in Fabric
- * and comes back. Selections are persisted in the item definition so re-running
- * a migration does not mean redoing this step.
+ * over. The user picks an existing Fabric connection or creates one inline, with
+ * the endpoint details prefilled from the ASA input so only the secret has to be
+ * typed. Selections persist in the item definition, so re-running a migration
+ * does not mean redoing this step.
  */
 export function ConnectionsStep({ wizardContext, updateContext }: WizardStepProps) {
   const context = asMigratorContext(wizardContext);
@@ -34,6 +37,8 @@ export function ConnectionsStep({ wizardContext, updateContext }: WizardStepProp
   const [connections, setConnections] = useState<Connection[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
+  /** ASA input name whose create-connection dialog is open, if any. */
+  const [creatingFor, setCreatingFor] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -110,7 +115,8 @@ export function ConnectionsStep({ wizardContext, updateContext }: WizardStepProp
     <div className="stream-migrator__step">
       <Text as="p">
         Stream Analytics credentials cannot be read from Azure, so each source needs a Fabric
-        connection. Create one in Fabric first if the list does not contain what you need.
+        connection. Pick an existing one, or create a new one here with the endpoint details
+        carried over from the job.
       </Text>
 
       {busy && <Spinner size="tiny" label="Loading connections..." />}
@@ -121,35 +127,61 @@ export function ConnectionsStep({ wizardContext, updateContext }: WizardStepProp
         const selectedId = context.connections?.[asaInputName];
         const selectedName = context.connectionNames?.[asaInputName];
 
+        const asaInput = (context.job?.properties?.inputs || []).find(
+          input => input.name === asaInputName
+        );
+
         return (
-          <Field
-            key={source.name}
-            label={`${asaInputName} (${source.type})`}
-            className="stream-migrator__field"
-            required
-          >
-            <Dropdown
-              placeholder={
-                connections.length ? "Select a connection" : "No connections available"
-              }
-              value={selectedName || ""}
-              selectedOptions={selectedId ? [selectedId] : []}
-              onOptionSelect={(_, data) => {
-                const match = connections.find(c => c.id === data.optionValue);
-                assign(asaInputName, data.optionValue, match?.displayName || "");
-              }}
+          <div key={source.name}>
+            <Field
+              label={`${asaInputName} (${source.type})`}
+              className="stream-migrator__field"
+              required
             >
-              {connections.map(connection => (
-                <Option
-                  key={connection.id}
-                  value={connection.id}
-                  text={connection.displayName}
+              <div className="stream-migrator__row">
+                <Dropdown
+                  placeholder={
+                    connections.length ? "Select a connection" : "No connections available"
+                  }
+                  value={selectedName || ""}
+                  selectedOptions={selectedId ? [selectedId] : []}
+                  onOptionSelect={(_, data) => {
+                    const match = connections.find(c => c.id === data.optionValue);
+                    assign(asaInputName, data.optionValue, match?.displayName || "");
+                  }}
                 >
-                  {connection.displayName} ({connection.connectionDetails?.type})
-                </Option>
-              ))}
-            </Dropdown>
-          </Field>
+                  {connections.map(connection => (
+                    <Option
+                      key={connection.id}
+                      value={connection.id}
+                      text={connection.displayName}
+                    >
+                      {connection.displayName} ({connection.connectionDetails?.type})
+                    </Option>
+                  ))}
+                </Dropdown>
+                <Button appearance="secondary" onClick={() => setCreatingFor(asaInputName)}>
+                  New...
+                </Button>
+              </div>
+            </Field>
+
+            {creatingFor === asaInputName && (
+              <CreateConnectionDialog
+                connectionClient={connectionClient}
+                eventstreamSourceType={source.type}
+                asaInput={asaInput}
+                suggestedDisplayName={`${context.job?.name || "asa"}-${asaInputName}`}
+                onCancel={() => setCreatingFor("")}
+                onCreated={connection => {
+                  // Adopt it immediately so the user does not have to re-pick.
+                  setConnections(prev => [connection, ...prev]);
+                  assign(asaInputName, connection.id, connection.displayName);
+                  setCreatingFor("");
+                }}
+              />
+            )}
+          </div>
         );
       })}
 

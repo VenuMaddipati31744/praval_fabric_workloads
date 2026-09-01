@@ -15,6 +15,7 @@ export * from "./emit/ItemPayload";
 export * from "./execute/asyncOperation";
 export * from "./execute/createEventstream";
 export * from "./mapping/sourceMap";
+export * from "./mapping/connectionPrefill";
 export * from "./mapping/destinationMap";
 export * from "./mapping/queryMap";
 export * from "./mapping/topology";
