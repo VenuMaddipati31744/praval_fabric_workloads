@@ -219,6 +219,15 @@ else {
                 )
             },
             @{
+                resourceAppId = "797f4846-ba00-4fd7-ba43-dac1f8f63013" # Azure Service Management (ARM)
+                resourceAccess = @(
+                    @{
+                        id = "41094075-9dad-400e-a0bd-54e686782033" # user_impersonation
+                        type = "Scope"
+                    }
+                )
+            },
+            @{
                 resourceAppId = "2746ea77-4702-4b45-80ca-3c97e680e8b7" # Azure Data Explorer
                 resourceAccess = @(
                     @{
