@@ -1,0 +1,68 @@
+/**
+ * Stream Migrator item styles.
+ *
+ * Item-specific overrides only. Layout, scrolling and ribbon styling belong to
+ * the shared ItemEditor and Wizard components and must not be redefined here.
+ */
+
+.stream-migrator {
+  &__step {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    height: auto;
+  }
+
+  &__field {
+    max-width: 560px;
+  }
+
+  &__row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+
+    > :first-child {
+      flex: 1 1 auto;
+    }
+  }
+
+  &__summary {
+    padding: 12px;
+    border-radius: 4px;
+    background-color: var(--colorNeutralBackground2);
+  }
+
+  &__target {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--colorNeutralStroke2);
+    border-radius: 4px;
+  }
+
+  &__muted {
+    color: var(--colorNeutralForeground3);
+    font-size: 12px;
+  }
+
+  &__problems {
+    margin: 4px 0 0;
+    padding-left: 20px;
+  }
+
+  // Wide content scrolls inside its own container so the page never scrolls sideways.
+  &__json {
+    margin: 0;
+    padding: 12px;
+    max-height: 420px;
+    overflow: auto;
+    border: 1px solid var(--colorNeutralStroke2);
+    border-radius: 4px;
+    background-color: var(--colorNeutralBackground3);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    white-space: pre;
+  }
+}
