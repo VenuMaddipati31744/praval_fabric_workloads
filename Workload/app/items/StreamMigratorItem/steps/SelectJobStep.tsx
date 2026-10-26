@@ -79,11 +79,21 @@ export function SelectJobStep({ wizardContext, updateContext }: WizardStepProps)
   const selectJob = (resourceId: string) =>
     run("job", async () => {
       const job = await armClient.getStreamingJobByResourceId(resourceId);
+      // Selections restored from the saved item belong to that item's job. Keep
+      // them when the same job is picked so the plan carries them; otherwise start
+      // clean so another job's mappings cannot match by name.
+      const sameJob = resourceId === context.jobResourceId;
+      const connections = sameJob ? context.connections : {};
+      const targets = sameJob ? context.targets : {};
+      if (!sameJob) {
+        updateContext("connections", connections);
+        updateContext("connectionNames", {});
+        updateContext("targets", targets);
+        updateContext("targetNames", {});
+      }
       updateContext("jobResourceId", resourceId);
       updateContext("job", job);
-      // Build an initial plan with no connections or targets yet, so the
-      // assessment step has something to show immediately.
-      updateContext("plan", buildMigrationPlan(job));
+      updateContext("plan", buildMigrationPlan(job, { connections, targets }));
       if (!context.eventstreamName) {
         updateContext("eventstreamName", job.name);
       }

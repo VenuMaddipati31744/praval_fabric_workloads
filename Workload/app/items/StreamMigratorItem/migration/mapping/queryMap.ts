@@ -67,8 +67,8 @@ const REVIEW_CONSTRUCTS: { pattern: RegExp; label: string; reason: string }[] = 
     pattern: /\bINTO\s+(\[[^\]]+\]|[A-Za-z0-9_]+)[\s\S]*\bINTO\s+/i,
     label: "multiple output targets",
     reason:
-      "The query writes to more than one target. Each becomes a separate derived stream; " +
-      "confirm every target has a matching destination."
+      "The query writes to more than one target. Each becomes a separate destination fed " +
+      "by the SQL operator; confirm every target has a matching output."
   }
 ];
 
@@ -77,6 +77,34 @@ export function stripSqlComments(query: string): string {
   return (query || "")
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .replace(/--[^\n\r]*/g, " ");
+}
+
+/**
+ * Points every FROM/JOIN of `fromName` at `toName`, leaving the rest of the
+ * query (comments included) untouched. ASA identifiers are case-insensitive.
+ */
+export function renameQuerySource(query: string, fromName: string, toName: string): string {
+  // Blank out comments without shifting offsets, so matches map back onto the original.
+  const masked = (query || "")
+    .replace(/\/\*[\s\S]*?\*\//g, comment => " ".repeat(comment.length))
+    .replace(/--[^\n\r]*/g, comment => " ".repeat(comment.length));
+  const pattern = /\b(FROM|JOIN)(\s+)(\[[^\]]+\]|[A-Za-z0-9_]+)/gi;
+  const wanted = fromName.toLowerCase();
+
+  let result = "";
+  let cursor = 0;
+  let match = pattern.exec(masked);
+  while (match) {
+    const identifier = match[3].replace(/^\[|\]$/g, "");
+    if (identifier.toLowerCase() === wanted) {
+      const start = match.index + match[1].length + match[2].length;
+      result += query.slice(cursor, start) + `[${toName}]`;
+      cursor = start + match[3].length;
+    }
+    match = pattern.exec(masked);
+  }
+
+  return result + query.slice(cursor);
 }
 
 function extractIdentifiers(query: string, keyword: "INTO" | "FROM"): string[] {

@@ -12,7 +12,7 @@
  * Exits non-zero on the first failed assertion.
  */
 
-import { buildMigrationPlan } from "./mapping/topology";
+import { asaOutputNameOf, bindToEventstream, buildMigrationPlan } from "./mapping/topology";
 import { stripSqlComments } from "./mapping/queryMap";
 import { buildCreateEventstreamRequest, toBase64 } from "./emit/ItemPayload";
 import { isAsyncOperation } from "./execute/asyncOperation";
@@ -66,8 +66,11 @@ console.log("\n== eventHubToKustoJob: should migrate cleanly ==");
     defaultStream?.inputNodes?.[0]?.name === "deviceInput-source"
   );
 
-  const derived = definition.streams.find(s => s.type === "DerivedStream");
-  check("derived stream named after ASA output", derived?.name === "kustoOutput");
+  // Fabric rejects a destination behind "SQL operator -> derived stream".
+  check(
+    "no derived stream",
+    !definition.streams.some(s => s.type === "DerivedStream")
+  );
 
   check("one SQL operator", definition.operators.length === 1);
   check("operator type is SQL", definition.operators[0]?.type === "SQL");
@@ -90,9 +93,17 @@ console.log("\n== eventHubToKustoJob: should migrate cleanly ==");
 
   check("one destination", definition.destinations.length === 1);
   check("destination is Eventhouse", definition.destinations[0]?.type === "Eventhouse");
+  check("destination named after ASA output", definition.destinations[0]?.name === "kustoOutput");
+  const nodeNames = [
+    ...definition.sources,
+    ...definition.destinations,
+    ...definition.streams,
+    ...definition.operators
+  ].map(node => node.name);
+  check("node names are unique", new Set(nodeNames).size === nodeNames.length, nodeNames.join(", "));
   check(
-    "destination reads the derived stream",
-    definition.destinations[0]?.inputNodes?.[0]?.name === "kustoOutput"
+    "destination reads the SQL operator",
+    definition.destinations[0]?.inputNodes?.[0]?.name === "telemetry-job-query"
   );
   check("ADX table name carried", definition.destinations[0]?.properties?.tableName === "Readings");
   check("compatibility level set", definition.compatibilityLevel === "1.0");
@@ -158,6 +169,61 @@ console.log("\n== commentedUdfJob: comments must not trip the scanner ==");
   check("iot hub targets AzureIoTHub", iotFinding?.targetType === "AzureIoTHub");
 
   check("job is migratable", assessment.canMigrate, blockedReasons(assessment));
+}
+
+console.log("\n== INTO target differs from output name only by case ==");
+{
+  // ASA treats `INTO dest` and an output named `Dest` as the same identifier.
+  const job = {
+    ...eventHubToKustoJob,
+    properties: {
+      ...eventHubToKustoJob.properties,
+      transformation: {
+        name: "Transformation",
+        properties: { query: "SELECT * INTO dest FROM deviceInput" }
+      },
+      outputs: [{ ...eventHubToKustoJob.properties!.outputs![0], name: "Dest" }]
+    }
+  };
+  const { definition, assessment } = buildMigrationPlan(job);
+  const destinationName = definition.destinations[0]?.name;
+
+  check("case-only mismatch is not blocked", assessment.canMigrate, blockedReasons(assessment));
+  check("destination takes the query's spelling", destinationName === "dest", destinationName);
+  check("destination maps back to the ASA output", asaOutputNameOf(job, destinationName) === "Dest");
+}
+
+console.log("\n== binding to the Eventstream's default stream ==");
+{
+  const query =
+    "/* reads FROM Source in a comment */\nSELECT\n    *\nINTO\n    Dest\nFROM\n    Source\n" +
+    "-- JOIN Source\n";
+  const job = {
+    ...eventHubToKustoJob,
+    properties: {
+      ...eventHubToKustoJob.properties,
+      inputs: [{ ...eventHubToKustoJob.properties!.inputs![0], name: "Source" }],
+      transformation: { name: "Transformation", properties: { query } },
+      outputs: [{ ...eventHubToKustoJob.properties!.outputs![0], name: "Dest" }]
+    }
+  };
+  const bound = bindToEventstream(buildMigrationPlan(job).definition, "DemoStreamAnalytics");
+  const defaultStream = bound.streams.find(s => s.type === "DefaultStream");
+  const boundQuery = bound.operators[0]?.properties?.query;
+
+  check("default stream renamed", defaultStream?.name === "DemoStreamAnalytics-stream", defaultStream?.name);
+  check("default stream still reads the source", defaultStream?.inputNodes?.[0]?.name === "Source-source");
+  check(
+    "operator reads the renamed stream",
+    bound.operators[0]?.inputNodes?.[0]?.name === "DemoStreamAnalytics-stream"
+  );
+  check("FROM rewritten", /FROM\s+\[DemoStreamAnalytics-stream\]/.test(boundQuery), boundQuery);
+  check("comments left alone", boundQuery.indexOf("reads FROM Source in a comment") !== -1);
+  check("line comment left alone", boundQuery.indexOf("-- JOIN Source") !== -1);
+  check("INTO untouched", /INTO\s+Dest/.test(boundQuery));
+  const nodeNames = [...bound.sources, ...bound.destinations, ...bound.streams, ...bound.operators]
+    .map(node => node.name);
+  check("bound node names are unique", new Set(nodeNames).size === nodeNames.length);
 }
 
 console.log("\n== helpers ==");

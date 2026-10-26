@@ -19,7 +19,7 @@ import { StreamMigratorItemEmptyView } from "./StreamMigratorItemEmptyView";
 import { StreamMigratorItemDefaultView } from "./StreamMigratorItemDefaultView";
 import { StreamMigratorItemRibbon } from "./StreamMigratorItemRibbon";
 import { MigratorWizardContext } from "./steps/WizardContext";
-import { createEventstream } from "./migration";
+import { bindToEventstream, createEventstream } from "./migration";
 import "./StreamMigratorItem.scss";
 
 export const EDITOR_VIEW_TYPES = {
@@ -214,12 +214,13 @@ export function StreamMigratorItemEditor(props: PageProps) {
     setMigrationStatus(t("StreamMigrator_Status_Creating", "Creating Eventstream..."));
 
     try {
+      const displayName = context.eventstreamName || context.plan.assessment.jobName;
       const result = await createEventstream(
         workloadClient,
         item.workspaceId,
-        context.plan.definition,
+        bindToEventstream(context.plan.definition, displayName),
         {
-          displayName: context.eventstreamName || context.plan.assessment.jobName,
+          displayName,
           description: `Migrated from Azure Stream Analytics job '${context.plan.assessment.jobName}'.`
         }
       );

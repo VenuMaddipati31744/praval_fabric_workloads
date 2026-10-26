@@ -8,6 +8,7 @@
  */
 
 import { MigratorWizardContext } from "./WizardContext";
+import { asaOutputNameOf } from "../migration";
 
 export interface MigrationReadiness {
   ready: boolean;
@@ -30,8 +31,13 @@ export function getMigrationReadiness(context: MigratorWizardContext): Migration
     );
   }
 
-  if (!(context.eventstreamName || "").trim()) {
+  const eventstreamName = (context.eventstreamName || "").trim();
+  if (!eventstreamName) {
     problems.push("The Eventstream needs a name.");
+  } else if (/[_.]/.test(eventstreamName)) {
+    // The SQL operator reads the default stream "<name>-stream", and Fabric
+    // documents names with underscores or dots as incompatible with it.
+    problems.push("The Eventstream name cannot contain underscores (_) or dots (.).");
   }
 
   for (const source of plan.definition.sources) {
@@ -42,22 +48,23 @@ export function getMigrationReadiness(context: MigratorWizardContext): Migration
   }
 
   for (const destination of plan.definition.destinations) {
-    const target = context.targets?.[destination.name];
+    const asaOutputName = asaOutputNameOf(context.job, destination.name);
+    const target = context.targets?.[asaOutputName];
 
     if (!target?.workspaceId || !target?.itemId) {
-      problems.push(`Output '${destination.name}' has no target item selected.`);
+      problems.push(`Output '${asaOutputName}' has no target item selected.`);
       continue;
     }
 
     if (destination.type === "Eventhouse") {
       if (!target.databaseName) {
-        problems.push(`Output '${destination.name}' needs a KQL database name.`);
+        problems.push(`Output '${asaOutputName}' needs a KQL database name.`);
       }
       if (!target.tableName) {
-        problems.push(`Output '${destination.name}' needs a destination table name.`);
+        problems.push(`Output '${asaOutputName}' needs a destination table name.`);
       }
     } else if (destination.type === "Lakehouse" && !target.deltaTable) {
-      problems.push(`Output '${destination.name}' needs a delta table name.`);
+      problems.push(`Output '${asaOutputName}' needs a delta table name.`);
     }
   }
 

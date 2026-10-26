@@ -3,12 +3,13 @@
  *
  * The shape is:
  *
- *   source --> DefaultStream --> SQL operator --> DerivedStream --> destination
+ *   source --> DefaultStream --> SQL operator --> destination
  *
- * Node naming is chosen so the ASA query needs no rewriting. The DefaultStream
- * takes the name of the ASA input, so `FROM [input]` resolves; each DerivedStream
- * takes the name of an ASA output, so `INTO [output]` resolves. The source node
- * is suffixed to keep names unique, since it is never referenced by the query.
+ * Each destination takes the name of an ASA output, so `INTO [output]` resolves
+ * as the SQL operator's output alias. The DefaultStream takes the ASA input's
+ * name until bindToEventstream renames it to the Eventstream's default stream
+ * and rewrites `FROM [input]` to match. The source node is suffixed to keep
+ * names unique, since the query never references it.
  */
 
 import { AsaStreamingJob } from "../../../../clients/AzureResourceManagerTypes";
@@ -17,8 +18,7 @@ import {
   EventstreamDestination,
   EventstreamSource,
   EventstreamStream,
-  EVENTSTREAM_COMPATIBILITY_LEVEL,
-  DEFAULT_JSON_SERIALIZATION
+  EVENTSTREAM_COMPATIBILITY_LEVEL
 } from "../emit/EventstreamDefinition";
 import {
   MappingFinding,
@@ -29,7 +29,7 @@ import {
 } from "../assess/Assessment";
 import { mapInput, sanitizeNodeName } from "./sourceMap";
 import { FabricTargetSelection, mapOutput } from "./destinationMap";
-import { mapQuery } from "./queryMap";
+import { mapQuery, renameQuerySource } from "./queryMap";
 
 export interface TopologyBuildOptions {
   /** Fabric targets per ASA output name, chosen by the user in the wizard. */
@@ -45,6 +45,31 @@ export interface MigrationPlan {
   /** The generated eventstream.json contents. Emitted even when blocked, for review. */
   definition: EventstreamDefinition;
   assessment: MigrationAssessment;
+}
+
+/**
+ * ASA identifiers are case-insensitive, so `INTO dest` writes to an output named
+ * `Dest`. Eventstream resolves node names exactly, so a node referenced by the
+ * query takes the query's spelling, which keeps the query verbatim.
+ */
+function matchQuerySpelling(nodeName: string, identifiers: string[]): string {
+  const lowered = nodeName.toLowerCase();
+  const match = identifiers.find(
+    id => id.toLowerCase() === lowered && sanitizeNodeName(id) === id
+  );
+  return match || nodeName;
+}
+
+/**
+ * Recovers the ASA output a destination node was generated from. Destination
+ * names are sanitized and may take the query's casing, so match loosely.
+ */
+export function asaOutputNameOf(job: AsaStreamingJob | undefined, destinationName: string): string {
+  const lowered = destinationName.toLowerCase();
+  const output = (job?.properties?.outputs || []).find(
+    candidate => sanitizeNodeName(candidate.name).toLowerCase() === lowered
+  );
+  return output?.name || destinationName;
 }
 
 /**
@@ -157,30 +182,23 @@ export function buildMigrationPlan(
       continue;
     }
 
-    const derivedStreamName = sanitizeNodeName(output.name);
-    streams.push({
-      name: derivedStreamName,
-      type: "DerivedStream",
-      properties: { inputSerialization: DEFAULT_JSON_SERIALIZATION },
-      inputNodes: [{ name: operatorName }]
-    });
-
+    // Fabric rejects a destination behind "SQL operator -> derived stream", so the
+    // operator feeds the destination directly and the destination is the INTO alias.
     destinations.push({
       ...result.node,
-      inputNodes: [{ name: derivedStreamName }]
+      name: matchQuerySpelling(result.node.name, queryResult.intoTargets),
+      inputNodes: [{ name: operatorName }]
     });
   }
 
   // ---- cross-checks -------------------------------------------------------
-  // The query is passed through verbatim, so its identifiers must line up with
-  // the nodes we generated. A mismatch means the created Eventstream would fail
-  // validation server-side, which is exactly what we want to catch here.
-  const derivedStreamNames = streams
-    .filter(stream => stream.type === "DerivedStream")
-    .map(stream => stream.name);
+  // The query's identifiers must line up with the nodes we generated. A mismatch
+  // means the created Eventstream would fail validation server-side, which is
+  // exactly what we want to catch here.
+  const destinationNames = destinations.map(destination => destination.name);
 
   for (const target of queryResult.intoTargets) {
-    if (derivedStreamNames.indexOf(target) === -1) {
+    if (destinationNames.indexOf(target) === -1) {
       findings.push(
         blocked(
           "Query",
@@ -219,4 +237,51 @@ export function buildMigrationPlan(
   };
 
   return { definition, assessment: buildAssessment(job.name, findings) };
+}
+
+/**
+ * Renames the default stream to `<eventstreamName>-stream`, the name Fabric
+ * gives an Eventstream's default stream, and repoints everything that read it,
+ * including FROM/JOIN clauses in the SQL query.
+ *
+ * Applied once the Eventstream name is final, so the plan can be built before
+ * the user has chosen one.
+ */
+export function bindToEventstream(
+  definition: EventstreamDefinition,
+  eventstreamName: string
+): EventstreamDefinition {
+  const defaultStream = definition.streams.find(stream => stream.type === "DefaultStream");
+  if (!defaultStream || !eventstreamName) {
+    return definition;
+  }
+
+  const oldName = defaultStream.name;
+  const newName = `${eventstreamName}-stream`;
+  const repoint = <T extends { name: string }>(nodes?: T[]): T[] | undefined =>
+    nodes?.map(node => (node.name === oldName ? { ...node, name: newName } : node));
+
+  return {
+    ...definition,
+    streams: definition.streams.map(stream => ({
+      ...stream,
+      name: stream === defaultStream ? newName : stream.name,
+      inputNodes: repoint(stream.inputNodes)
+    })),
+    operators: definition.operators.map(operator => ({
+      ...operator,
+      inputNodes: repoint(operator.inputNodes),
+      properties:
+        operator.type === "SQL" && operator.properties
+          ? {
+              ...operator.properties,
+              query: renameQuerySource(operator.properties.query || "", oldName, newName)
+            }
+          : operator.properties
+    })),
+    destinations: definition.destinations.map(destination => ({
+      ...destination,
+      inputNodes: repoint(destination.inputNodes)
+    }))
+  };
 }

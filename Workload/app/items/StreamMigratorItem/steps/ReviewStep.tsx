@@ -11,6 +11,7 @@ import {
 import { WizardStepProps } from "../../../components/Wizard/Wizard";
 import { asMigratorContext } from "./WizardContext";
 import { getMigrationReadiness } from "./readiness";
+import { bindToEventstream } from "../migration";
 
 /**
  * Step 5: name the Eventstream and review the definition that will be created.
@@ -79,7 +80,7 @@ export function ReviewStep({ wizardContext, updateContext }: WizardStepProps) {
         Generated eventstream.json
       </Text>
       <pre className="stream-migrator__json">
-        {JSON.stringify(plan.definition, null, 2)}
+        {JSON.stringify(bindToEventstream(plan.definition, context.eventstreamName || ""), null, 2)}
       </pre>
     </div>
   );

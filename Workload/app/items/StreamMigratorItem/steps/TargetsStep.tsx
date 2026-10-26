@@ -11,7 +11,7 @@ import {
 
 import { WizardStepProps } from "../../../components/Wizard/Wizard";
 import { callDatahubOpen } from "../../../controller/DataHubController";
-import { FabricTargetSelection, buildMigrationPlan } from "../migration";
+import { FabricTargetSelection, asaOutputNameOf, buildMigrationPlan } from "../migration";
 import { asMigratorContext } from "./WizardContext";
 
 /**
@@ -45,19 +45,25 @@ export function TargetsStep({ wizardContext, updateContext }: WizardStepProps) {
   }
 
   async function pickTargetItem(asaOutputName: string, destinationType: string): Promise<void> {
-    // Eventhouse destinations select a KustoEventHouse; Lakehouse selects a Lakehouse.
-    const supportedType = destinationType === "Eventhouse" ? "KustoEventHouse" : "Lakehouse";
+    // An Eventhouse destination's itemId is the KQL database, not the Eventhouse:
+    // Fabric resolves the cluster URL from the database item.
+    const isEventhouse = destinationType === "Eventhouse";
+    const supportedType = isEventhouse ? "KustoDatabase" : "Lakehouse";
 
     try {
       const result = await callDatahubOpen(
         context.workloadClient,
         [supportedType],
-        `Select the ${destinationType} to receive '${asaOutputName}'`,
+        `Select the ${isEventhouse ? "KQL database" : destinationType} to receive '${asaOutputName}'`,
         false
       );
 
       if (result) {
-        updateTarget(asaOutputName, { workspaceId: result.workspaceId, itemId: result.id });
+        updateTarget(asaOutputName, {
+          workspaceId: result.workspaceId,
+          itemId: result.id,
+          ...(isEventhouse ? { databaseName: result.displayName } : {})
+        });
         updateContext("targetNames", {
           ...(context.targetNames || {}),
           [asaOutputName]: result.displayName
@@ -98,7 +104,7 @@ export function TargetsStep({ wizardContext, updateContext }: WizardStepProps) {
       </Text>
 
       {destinations.map(destination => {
-        const asaOutputName = destination.name;
+        const asaOutputName = asaOutputNameOf(context.job, destination.name);
         const target = context.targets?.[asaOutputName] || {};
         const pickedName = context.targetNames?.[asaOutputName];
         const isEventhouse = destination.type === "Eventhouse";
