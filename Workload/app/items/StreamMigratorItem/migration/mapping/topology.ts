@@ -30,6 +30,7 @@ import {
 import { mapInput, sanitizeNodeName } from "./sourceMap";
 import { FabricTargetSelection, mapOutput } from "./destinationMap";
 import { mapQuery, renameQuerySource } from "./queryMap";
+import { QueryAnalysis } from "../assess/queryAnalysis";
 
 export interface TopologyBuildOptions {
   /** Fabric targets per ASA output name, chosen by the user in the wizard. */
@@ -45,6 +46,8 @@ export interface MigrationPlan {
   /** The generated eventstream.json contents. Emitted even when blocked, for review. */
   definition: EventstreamDefinition;
   assessment: MigrationAssessment;
+  /** Construct-by-construct evaluation of the query against Eventstream SQL support. */
+  queryAnalysis: QueryAnalysis;
 }
 
 /**
@@ -236,7 +239,11 @@ export function buildMigrationPlan(
     compatibilityLevel: EVENTSTREAM_COMPATIBILITY_LEVEL
   };
 
-  return { definition, assessment: buildAssessment(job.name, findings) };
+  return {
+    definition,
+    assessment: buildAssessment(job.name, findings),
+    queryAnalysis: queryResult.analysis
+  };
 }
 
 /**

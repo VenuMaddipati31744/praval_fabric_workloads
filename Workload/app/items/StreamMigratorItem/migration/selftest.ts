@@ -14,6 +14,8 @@
 
 import { asaOutputNameOf, bindToEventstream, buildMigrationPlan } from "./mapping/topology";
 import { stripSqlComments } from "./mapping/queryMap";
+import { QueryAnalysis, analyzeQuery } from "./assess/queryAnalysis";
+import { QUERY_RULES } from "./assess/queryRules";
 import { buildCreateEventstreamRequest, toBase64 } from "./emit/ItemPayload";
 import { isAsyncOperation } from "./execute/asyncOperation";
 import {
@@ -191,6 +193,76 @@ console.log("\n== INTO target differs from output name only by case ==");
   check("case-only mismatch is not blocked", assessment.canMigrate, blockedReasons(assessment));
   check("destination takes the query's spelling", destinationName === "dest", destinationName);
   check("destination maps back to the ASA output", asaOutputNameOf(job, destinationName) === "Dest");
+}
+
+console.log("\n== query analysis: Eventstream SQL support matrix ==");
+{
+  const withQuery = (query: string, extra: Record<string, any> = {}) => ({
+    ...eventHubToKustoJob,
+    properties: {
+      ...eventHubToKustoJob.properties,
+      ...extra,
+      transformation: { name: "Transformation", properties: { query } }
+    }
+  });
+  const ids = (analysis: QueryAnalysis) => analysis.constructs.map(c => c.rule.id);
+
+  // Geospatial and anomaly detection carry Microsoft's "Fabric Eventstream" badge.
+  const geo = buildMigrationPlan(withQuery(
+    "SELECT ST_WITHIN(CreatePoint(lat, lon), zone) AS inside,\n" +
+    "  AnomalyDetection_SpikeAndDip(CAST(t AS FLOAT), 95, 120, 'spikesanddips') OVER (LIMIT DURATION(second, 120)) AS s\n" +
+    "INTO [kustoOutput] FROM [deviceInput]"
+  ));
+  check("geospatial is not blocked", geo.assessment.canMigrate, blockedReasons(geo.assessment));
+  check("geospatial reported supported", geo.queryAnalysis.constructs.some(c => c.rule.id === "geospatial" && c.rule.support === "Supported"));
+  check("anomaly detection reported supported", ids(geo.queryAnalysis).indexOf("anomaly-detection") !== -1);
+  check("line numbers point at the construct", geo.queryAnalysis.constructs.find(c => c.rule.id === "anomaly-detection")?.occurrences[0]?.line === 2);
+
+  // Comments and string literals must never count.
+  const masked = analyzeQuery(withQuery(
+    "/* udf.old(x) */ SELECT 'udf.notreal' AS note -- TumblingWindow(second, 5)\nINTO [kustoOutput] FROM [deviceInput]"
+  ));
+  check("udf inside a string literal ignored", ids(masked).indexOf("udf-call") === -1);
+  check("window inside a comment ignored", ids(masked).indexOf("window-tumbling") === -1);
+
+  // PARTITION BY inside OVER(...) is analytic partitioning, not input partitioning.
+  const over = analyzeQuery(withQuery(
+    "SELECT LAG(v) OVER (PARTITION BY id LIMIT DURATION(minute, 1)) AS prev INTO [kustoOutput] FROM [deviceInput]"
+  ));
+  check("PARTITION BY inside OVER not flagged", ids(over).indexOf("partition-by") === -1);
+  check("LAG recognized", ids(over).indexOf("lag") !== -1);
+  const input = analyzeQuery(withQuery(
+    "SELECT * INTO [kustoOutput] FROM [deviceInput] PARTITION BY PartitionId"
+  ));
+  check("input PARTITION BY needs review", input.constructs.some(c => c.rule.id === "partition-by" && c.rule.support === "NeedsReview"));
+
+  // JOIN is classified by what it joins against.
+  const joins = analyzeQuery(withQuery(
+    "SELECT * INTO [kustoOutput] FROM [deviceInput] d\n" +
+    "JOIN [lookup] r ON d.id = r.id\n" +
+    "JOIN [other] o ON DATEDIFF(second, d, o) BETWEEN 0 AND 5 AND d.id = o.id",
+    { inputs: [...eventHubToKustoJob.properties!.inputs!, { name: "lookup", properties: { type: "Reference" } }] }
+  ));
+  check("reference JOIN needs review", joins.constructs.find(c => c.rule.id === "join-reference")?.occurrences[0]?.line === 2);
+  check("stream JOIN supported", joins.constructs.find(c => c.rule.id === "join-stream")?.occurrences[0]?.line === 3);
+
+  // UDF calls block; metadata needs review; several outputs are supported.
+  const mixed = buildMigrationPlan(withQuery(
+    "SELECT udf.clean(payload) AS p, GetMetadataPropertyValue(e, 'EventId') AS id INTO [a] FROM [deviceInput] e\n" +
+    "SELECT * INTO [b] FROM [deviceInput]"
+  ));
+  check("udf call blocks", mixed.queryAnalysis.constructs.some(c => c.rule.id === "udf-call" && c.rule.support === "Unsupported"));
+  check("metadata function needs review", ids(mixed.queryAnalysis).indexOf("metadata-function") !== -1);
+  check("multiple outputs recognized", ids(mixed.queryAnalysis).indexOf("multiple-outputs") !== -1);
+  check("unsupported sorted first", mixed.queryAnalysis.constructs[0]?.rule.support === "Unsupported");
+  check("line 1 highlighted as unsupported", mixed.queryAnalysis.lineSupport[1] === "Unsupported");
+
+  // Job-level settings surface without a line.
+  const legacy = analyzeQuery(withQuery("SELECT * INTO [kustoOutput] FROM [deviceInput]", { compatibilityLevel: "1.0" }));
+  check("compatibility level 1.0 flagged", legacy.constructs.some(c => c.rule.id === "compat-level" && c.occurrences.length === 0));
+
+  // Every rule cites a Microsoft Learn page.
+  check("every rule links Microsoft Learn", QUERY_RULES.every(r => r.docUrl.indexOf("https://learn.microsoft.com/") === 0));
 }
 
 console.log("\n== binding to the Eventstream's default stream ==");

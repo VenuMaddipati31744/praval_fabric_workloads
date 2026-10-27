@@ -10,6 +10,8 @@
  */
 
 export * from "./assess/Assessment";
+export * from "./assess/queryAnalysis";
+export * from "./assess/queryRules";
 export * from "./emit/EventstreamDefinition";
 export * from "./emit/ItemPayload";
 export * from "./execute/asyncOperation";

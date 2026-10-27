@@ -50,8 +50,9 @@ function serializationOf(input: AsaInput) {
 /**
  * Maps one ASA input.
  *
- * Reference inputs are rejected regardless of their datasource: Eventstream has
- * no reference-data concept, so a query joining against one cannot run.
+ * Reference inputs are rejected regardless of their datasource: Eventstream reads
+ * reference data only from Lakehouse Delta tables, which the migrator cannot
+ * create, so a query joining against one cannot run as generated.
  */
 export function mapInput(input: AsaInput): SourceMappingResult {
   const name = sanitizeNodeName(input.name);
@@ -65,8 +66,9 @@ export function mapInput(input: AsaInput): SourceMappingResult {
         "Input",
         input.name,
         datasourceType,
-        "Reference data inputs have no Eventstream equivalent. Load this data into an " +
-          "Eventhouse or Lakehouse table and join against it downstream instead."
+        "Eventstream joins reference data only from Lakehouse Delta tables. Load this data " +
+          "into a Lakehouse table, then connect it to the SQL operator after migrating the " +
+          "rest of the job."
       )
     };
   }

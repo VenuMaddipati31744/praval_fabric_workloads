@@ -16,6 +16,7 @@ import {
 import { WizardStepProps } from "../../../components/Wizard/Wizard";
 import { MappingStatus } from "../migration";
 import { asMigratorContext } from "./WizardContext";
+import { QueryAnalysisPanel } from "./QueryAnalysisPanel";
 
 const STATUS_APPEARANCE: Record<MappingStatus, "success" | "warning" | "danger"> = {
   Mapped: "success",
@@ -92,6 +93,8 @@ export function AssessmentStep({ wizardContext }: WizardStepProps) {
           ))}
         </TableBody>
       </Table>
+
+      {plan.queryAnalysis && <QueryAnalysisPanel analysis={plan.queryAnalysis} />}
     </div>
   );
 }
