@@ -13,6 +13,8 @@
 
 import { AsaStreamingJob } from "../../../../clients/AzureResourceManagerTypes";
 import { QueryRule, QuerySupport, QUERY_RULES, ruleById } from "./queryRules";
+import { parseQueryStructure, resolveReads, siteAt } from "./queryStructure";
+import { maskQuery } from "./queryMask";
 
 export interface QueryOccurrence {
   /** 1-based line in the original query. */
@@ -37,12 +39,7 @@ export interface QueryAnalysis {
 
 const SEVERITY: Record<QuerySupport, number> = { Supported: 0, NeedsReview: 1, Unsupported: 2 };
 
-/** Blanks comments and string literals with spaces, preserving offsets and newlines. */
-export function maskQuery(query: string): string {
-  const blank = (text: string) => text.replace(/[^\n]/g, " ");
-  return (query || "")
-    .replace(/\/\*[\s\S]*?\*\/|--[^\n\r]*|'(?:[^']|'')*'/g, blank);
-}
+export { maskQuery };
 
 function lineAt(query: string, offset: number): number {
   let line = 1;
@@ -103,17 +100,32 @@ export function analyzeQuery(job: AsaStreamingJob): QueryAnalysis {
     }
   }
 
-  // ---- JOIN: stream-to-stream or against reference data ------------------
+  // ---- JOIN: against reference data, within one input, or across inputs ---
+  const isReference = (input: { properties?: { type?: string } }) =>
+    (input.properties?.type || "").toLowerCase() === "reference";
   const referenceInputs = new Set(
-    (properties.inputs || [])
-      .filter(input => (input.properties?.type || "").toLowerCase() === "reference")
-      .map(input => input.name.toLowerCase())
+    (properties.inputs || []).filter(isReference).map(input => input.name.toLowerCase())
   );
+  const streamInputs = new Set(
+    (properties.inputs || []).filter(input => !isReference(input)).map(input => input.name.toLowerCase())
+  );
+  const structure = streamInputs.size > 1 ? parseQueryStructure(query) : undefined;
+  /** True when the step or statement around `offset` reads two or more stream inputs. */
+  const readsSeveralInputs = (offset: number) => {
+    const site = structure && siteAt(structure, offset);
+    return Boolean(
+      site && resolveReads(structure, site).names.filter(name => streamInputs.has(name)).length > 1
+    );
+  };
   const joinPattern = /\bJOIN\s+(\[[^\]]+\]|[A-Za-z_][\w-]*)/gi;
   let join = joinPattern.exec(masked);
   while (join) {
-    const isReference = referenceInputs.has(identifierName(join[1]));
-    add(isReference ? "join-reference" : "join-stream", join.index, join[0]);
+    const id = referenceInputs.has(identifierName(join[1]))
+      ? "join-reference"
+      : readsSeveralInputs(join.index)
+        ? "join-inputs"
+        : "join-stream";
+    add(id, join.index, join[0]);
     join = joinPattern.exec(masked);
   }
 

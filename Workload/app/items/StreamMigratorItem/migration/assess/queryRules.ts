@@ -100,6 +100,17 @@ export const QUERY_RULES: QueryRule[] = [
     docUrl: `${REF}/join-azure-stream-analytics`
   },
   {
+    // The JOIN itself is supported; what cannot carry over is the two inputs.
+    id: "join-inputs", label: "JOIN across stream inputs", category: "Join", support: "Unsupported",
+    detail:
+      "Joins events from two different stream inputs. An Eventstream feeds every source into its one " +
+      "default stream, so both sides of the JOIN would read the same mixed events and match events " +
+      "from the wrong input. Reading two separate streams in one SQL operator is not confirmed by " +
+      "Microsoft documentation, so the migrator does not attempt it. Keep this job in Stream " +
+      "Analytics, or build the Eventstream by hand and test it.",
+    docUrl: ES_SQL
+  },
+  {
     id: "join-reference", label: "Reference data JOIN", category: "Join", support: "NeedsReview",
     detail:
       "Eventstream joins reference data only from Lakehouse Delta tables. Load this data into a " +
