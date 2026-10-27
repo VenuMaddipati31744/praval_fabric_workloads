@@ -23,7 +23,8 @@
         ]},
         "recommendedItemTypes": [
           "HelloWorld",
-          "StreamMigrator"
+          "StreamMigrator",
+          "EventhouseMigrator"
         ]
     },
     "createExperience": {
@@ -66,6 +67,27 @@
             "workspace-plus-new-teams"
           ],
           "itemType": "StreamMigrator",
+          "createItemDialogConfig": {
+            "onCreationFailure": { "action": "item.onCreationFailure" },
+            "onCreationSuccess": { "action": "item.onCreationSuccess" }
+          }
+        },
+        {
+          "title": "EventhouseMigratorItem_DisplayName",
+          "description": "EventhouseMigratorItem_Description",
+          "icon": {
+            "name": "assets/images/EventhouseMigratorItem_Icon.png"
+          },
+          "icon_small": {
+            "name": "assets/images/EventhouseMigratorItem_Icon.png"
+          },
+          "availableIn": [
+            "home",
+            "create-hub",
+            "workspace-plus-new",
+            "workspace-plus-new-teams"
+          ],
+          "itemType": "EventhouseMigrator",
           "createItemDialogConfig": {
             "onCreationFailure": { "action": "item.onCreationFailure" },
             "onCreationSuccess": { "action": "item.onCreationSuccess" }

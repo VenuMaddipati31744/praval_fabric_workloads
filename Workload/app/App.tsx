@@ -4,6 +4,7 @@ import { History } from "history";
 import { WorkloadClientAPI } from "@ms-fabric/workload-client";
 import { HelloWorldItemEditor} from "./items/HelloWorldItem";
 import { StreamMigratorItemEditor } from "./items/StreamMigratorItem";
+import { EventhouseMigratorItemEditor } from "./items/EventhouseMigratorItem";
 import { ConditionalPlaygroundRoutes } from "./playground/ConditionalPlaygroundRoutes";
 
 /*
@@ -54,6 +55,12 @@ export function App({ history, workloadClient }: AppProps) {
             <Route path="/StreamMigratorItem-editor/:itemObjectId">
                 <StreamMigratorItemEditor
                     workloadClient={workloadClient} data-testid="StreamMigratorItem-editor" />
+            </Route>
+
+            {/* Routings for the Eventhouse Migrator Item Editor */}
+            <Route path="/EventhouseMigratorItem-editor/:itemObjectId">
+                <EventhouseMigratorItemEditor
+                    workloadClient={workloadClient} data-testid="EventhouseMigratorItem-editor" />
             </Route>
 
             {/* Conditionally loaded playground routes (only in development) */}

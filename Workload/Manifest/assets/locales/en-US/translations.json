@@ -12,5 +12,8 @@
     "HelloWorldItem_Description": "A Hello World Item to start your Dev Experience",
     "StreamMigratorItem_DisplayName": "Stream Migrator",
     "StreamMigratorItem_DisplayName_Plural": "Stream Migrators",
-    "StreamMigratorItem_Description": "Migrate Azure Stream Analytics jobs to Fabric Eventstreams"
+    "StreamMigratorItem_Description": "Migrate Azure Stream Analytics jobs to Fabric Eventstreams",
+    "EventhouseMigratorItem_DisplayName": "Eventhouse Migrator",
+    "EventhouseMigratorItem_DisplayName_Plural": "Eventhouse Migrators",
+    "EventhouseMigratorItem_Description": "Migrate Azure Data Explorer databases to Eventhouse, preserving extent creation times for retention and caching"
 }

@@ -1,0 +1,120 @@
+/**
+ * Eventhouse Migrator item styles.
+ *
+ * Item-specific overrides only. Layout, scrolling and ribbon styling belong to
+ * the shared ItemEditor and Wizard components and must not be redefined here.
+ */
+
+.eh-migrator {
+  &__step {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    height: auto;
+  }
+
+  &__run {
+    padding: 16px 24px;
+  }
+
+  &__field {
+    max-width: 640px;
+  }
+
+  &__row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+
+    > :first-child {
+      flex: 1 1 auto;
+    }
+
+    &--start > :first-child {
+      flex: 0 0 auto;
+    }
+
+    &--excluded {
+      opacity: 0.55;
+    }
+  }
+
+  &__run-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+
+  &__summary {
+    padding: 12px;
+    border-radius: 4px;
+    background-color: var(--colorNeutralBackground2);
+  }
+
+  &__muted {
+    color: var(--colorNeutralForeground3);
+    font-size: 12px;
+  }
+
+  // The tables grid is wide; it scrolls inside its own container.
+  &__table-wrap {
+    overflow-x: auto;
+  }
+
+  &__col-check {
+    width: 40px;
+  }
+
+  &__policy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 170px;
+  }
+
+  &__issues {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 12px;
+  }
+
+  &__issue--error {
+    color: var(--colorPaletteRedForeground1);
+  }
+
+  &__issue--warning {
+    color: var(--colorPaletteDarkOrangeForeground1);
+  }
+
+  &__plan-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  &__plan-list {
+    margin: 4px 0 8px;
+    padding-left: 20px;
+  }
+
+  &__code {
+    margin: 0;
+    padding: 12px;
+    max-height: 320px;
+    overflow: auto;
+    border: 1px solid var(--colorNeutralStroke2);
+    border-radius: 4px;
+    background-color: var(--colorNeutralBackground3);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    white-space: pre;
+  }
+
+  &__log {
+    max-height: 260px;
+  }
+}
