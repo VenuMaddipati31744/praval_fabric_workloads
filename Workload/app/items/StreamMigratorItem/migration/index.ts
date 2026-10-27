@@ -12,6 +12,7 @@
 export * from "./assess/Assessment";
 export * from "./assess/queryAnalysis";
 export * from "./assess/queryRules";
+export * from "./assess/queryStructure";
 export * from "./emit/EventstreamDefinition";
 export * from "./emit/ItemPayload";
 export * from "./execute/asyncOperation";
@@ -19,5 +20,6 @@ export * from "./execute/createEventstream";
 export * from "./mapping/sourceMap";
 export * from "./mapping/connectionPrefill";
 export * from "./mapping/destinationMap";
+export * from "./mapping/inputGroups";
 export * from "./mapping/queryMap";
 export * from "./mapping/topology";

@@ -19,7 +19,7 @@ import { StreamMigratorItemEmptyView } from "./StreamMigratorItemEmptyView";
 import { StreamMigratorItemDefaultView } from "./StreamMigratorItemDefaultView";
 import { StreamMigratorItemRibbon } from "./StreamMigratorItemRibbon";
 import { MigratorWizardContext } from "./steps/WizardContext";
-import { bindToEventstream, createEventstream } from "./migration";
+import { bindPlan, createEventstream } from "./migration";
 import "./StreamMigratorItem.scss";
 
 export const EDITOR_VIEW_TYPES = {
@@ -186,15 +186,19 @@ export function StreamMigratorItemEditor(props: PageProps) {
           }
         : undefined,
       createdEventstreamId: currentDefinition.createdEventstreamId,
+      createdEventstreamIds: currentDefinition.createdEventstreamIds,
       migratedAt: currentDefinition.migratedAt
     };
   }
 
   /**
-   * Saves the reviewed plan, then creates the Eventstream in this item's workspace.
+   * Saves the reviewed plan, then creates the Eventstream(s) in this item's workspace.
    *
    * The plan is persisted before the create is attempted so that a rejected
    * topology does not cost the user their connection and target selections.
+   * A job split into independent pipelines yields several Eventstreams; they are
+   * created one at a time and each id is persisted as soon as it exists, so a
+   * failure part-way leaves an accurate record of what was already created.
    */
   async function runMigration(context: MigratorWizardContext): Promise<void> {
     if (!context.plan || !item) {
@@ -211,43 +215,69 @@ export function StreamMigratorItemEditor(props: PageProps) {
       return;
     }
 
-    setMigrationStatus(t("StreamMigrator_Status_Creating", "Creating Eventstream..."));
+    const jobName = context.plan.assessment.jobName;
+    const bound = bindPlan(context.plan, (context.eventstreamName || "").trim() || jobName);
+    const createdIds: string[] = [];
+    const createdNames: string[] = [];
+    let current = "";
 
     try {
-      const displayName = context.eventstreamName || context.plan.assessment.jobName;
-      const result = await createEventstream(
-        workloadClient,
-        item.workspaceId,
-        bindToEventstream(context.plan.definition, displayName),
-        {
-          displayName,
-          description: `Migrated from Azure Stream Analytics job '${context.plan.assessment.jobName}'.`
-        }
-      );
+      for (const eventstream of bound) {
+        current = eventstream.displayName;
+        setMigrationStatus(
+          bound.length > 1
+            ? t("StreamMigrator_Status_CreatingOneOf", {
+                index: createdIds.length + 1,
+                count: bound.length,
+                eventstreamName: current,
+                defaultValue: `Creating Eventstream ${createdIds.length + 1} of ${bound.length} (${current})...`
+              })
+            : t("StreamMigrator_Status_Creating", "Creating Eventstream...")
+        );
 
-      await persist(
-        {
-          ...planDefinition,
-          createdEventstreamId: result.item.id,
-          migratedAt: new Date().toISOString()
-        },
-        { notify: false }
-      );
+        const result = await createEventstream(workloadClient, item.workspaceId, eventstream.definition, {
+          displayName: current,
+          description:
+            `Migrated from Azure Stream Analytics job '${jobName}'` +
+            (bound.length > 1 ? ` (inputs: ${eventstream.inputs.join(", ")}).` : ".")
+        });
+        createdIds.push(result.item.id);
+        createdNames.push(result.item.displayName);
+
+        await persist(
+          {
+            ...planDefinition,
+            createdEventstreamId: createdIds[0],
+            createdEventstreamIds: [...createdIds],
+            migratedAt: new Date().toISOString()
+          },
+          { notify: false }
+        );
+      }
 
       setMigrationStatus("");
+      const names = createdNames.join(", ");
       callNotificationOpen(
         workloadClient,
         t("StreamMigrator_Created_Title", "Eventstream created"),
         t("StreamMigrator_Created_Text", {
-          eventstreamName: result.item.displayName,
-          defaultValue: `${result.item.displayName} was created in this workspace.`
+          eventstreamName: names,
+          defaultValue: `${names} ${createdNames.length > 1 ? "were" : "was"} created in this workspace.`
         }),
         undefined,
         undefined
       );
     } catch (error) {
       // Fabric validates the topology server-side, so its message is the useful one.
-      const message = error?.message || String(error);
+      let message = error?.message || String(error);
+      if (bound.length > 1) {
+        message =
+          `Could not create '${current}': ${message}` +
+          (createdIds.length > 0
+            ? ` ${createdIds.length} of ${bound.length} Eventstreams (${createdNames.join(", ")}) ` +
+              "were already created. Delete them before retrying, or they will be duplicated."
+            : "");
+      }
       console.error("Eventstream creation failed:", error);
       setMigrationStatus("");
       setMigrationError(message);

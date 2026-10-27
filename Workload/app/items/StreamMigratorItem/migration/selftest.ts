@@ -12,7 +12,16 @@
  * Exits non-zero on the first failed assertion.
  */
 
-import { asaOutputNameOf, bindToEventstream, buildMigrationPlan } from "./mapping/topology";
+import {
+  asaInputNameOf,
+  asaOutputNameOf,
+  bindPlan,
+  bindToEventstream,
+  buildMigrationPlan,
+  duplicateNodeNames,
+  eventstreamNamesFor
+} from "./mapping/topology";
+import { EventstreamDefinition } from "./emit/EventstreamDefinition";
 import { stripSqlComments } from "./mapping/queryMap";
 import { QueryAnalysis, analyzeQuery } from "./assess/queryAnalysis";
 import { QUERY_RULES } from "./assess/queryRules";
@@ -28,8 +37,18 @@ import {
   blobToSqlJob,
   commentedUdfJob,
   eventHubToKustoJob,
-  referenceAndUdfJob
+  fanOutJob,
+  referenceAndUdfJob,
+  sameNameJob,
+  separatePipelinesJob,
+  streamJoinJob,
+  unionTwoHubsJob
 } from "./__fixtures__/asaJobs";
+
+/** A copy of a job's first output, renamed. */
+function kustoOutputFor(job: typeof sameNameJob, name: string) {
+  return { ...job.properties!.outputs![0], name };
+}
 
 let failures = 0;
 let checks = 0;
@@ -53,7 +72,7 @@ function blockedReasons(assessment: MigrationAssessment): string {
 
 console.log("\n== eventHubToKustoJob: should migrate cleanly ==");
 {
-  const { definition, assessment } = buildMigrationPlan(eventHubToKustoJob);
+  const { eventstreams: [{ definition }], assessment } = buildMigrationPlan(eventHubToKustoJob);
 
   check("assessment reports migratable", assessment.canMigrate, blockedReasons(assessment));
   check("no blocked findings", assessment.counts.Blocked === 0);
@@ -113,7 +132,7 @@ console.log("\n== eventHubToKustoJob: should migrate cleanly ==");
 
 console.log("\n== blobToSqlJob: both ends unsupported ==");
 {
-  const { definition, assessment } = buildMigrationPlan(blobToSqlJob);
+  const { eventstreams: [{ definition }], assessment } = buildMigrationPlan(blobToSqlJob);
 
   check("assessment reports NOT migratable", !assessment.canMigrate);
   check("no sources generated", definition.sources.length === 0);
@@ -187,7 +206,7 @@ console.log("\n== INTO target differs from output name only by case ==");
       outputs: [{ ...eventHubToKustoJob.properties!.outputs![0], name: "Dest" }]
     }
   };
-  const { definition, assessment } = buildMigrationPlan(job);
+  const { eventstreams: [{ definition }], assessment } = buildMigrationPlan(job);
   const destinationName = definition.destinations[0]?.name;
 
   check("case-only mismatch is not blocked", assessment.canMigrate, blockedReasons(assessment));
@@ -279,7 +298,7 @@ console.log("\n== binding to the Eventstream's default stream ==");
       outputs: [{ ...eventHubToKustoJob.properties!.outputs![0], name: "Dest" }]
     }
   };
-  const bound = bindToEventstream(buildMigrationPlan(job).definition, "DemoStreamAnalytics");
+  const bound = bindToEventstream(buildMigrationPlan(job).eventstreams[0].definition, "DemoStreamAnalytics");
   const defaultStream = bound.streams.find(s => s.type === "DefaultStream");
   const boundQuery = bound.operators[0]?.properties?.query;
 
@@ -298,6 +317,286 @@ console.log("\n== binding to the Eventstream's default stream ==");
   check("bound node names are unique", new Set(nodeNames).size === nodeNames.length);
 }
 
+/** Every node name in a definition, for uniqueness checks. */
+function nodeNamesOf(definition: EventstreamDefinition): string[] {
+  return [...definition.sources, ...definition.destinations, ...definition.streams, ...definition.operators]
+    .map(node => node.name);
+}
+
+function findingsOf(assessment: MigrationAssessment, asaType: string, status?: string) {
+  return assessment.findings.filter(f => f.asaType === asaType && (!status || f.status === status));
+}
+
+console.log("\n== unionTwoHubsJob: identical UNION branches merge into one default stream ==");
+{
+  const plan = buildMigrationPlan(unionTwoHubsJob);
+  const { assessment } = plan;
+
+  check("migratable", assessment.canMigrate, blockedReasons(assessment));
+  check("one Eventstream", plan.eventstreams.length === 1);
+  const definition = plan.eventstreams[0].definition;
+  check("both inputs ingested", plan.eventstreams[0].inputs.join(",") === "eastHub,westHub");
+  check("two sources", definition.sources.map(s => s.name).join(",") === "eastHub-source,westHub-source");
+  check(
+    "both sources feed the default stream",
+    definition.streams[0]?.inputNodes?.map(n => n.name).join(",") === "eastHub-source,westHub-source"
+  );
+  check("one default stream, no derived stream", definition.streams.length === 1);
+
+  const merge = findingsOf(assessment, "multiple inputs", "Approximated")[0];
+  check("merge raised as approximated", Boolean(merge));
+  check("merge reason explains the collapse", /collapsed to one branch/.test(merge?.reason || ""), merge?.reason);
+
+  // Both branches would read the merged stream, so keeping both would duplicate every event.
+  const query = definition.operators[0]?.properties?.query || "";
+  check("UNION collapsed to its first branch", !/\bUNION\b/.test(stripSqlComments(query)), query);
+  check("second branch removed", query.indexOf("westHub") === -1, query);
+  check("first branch kept verbatim", query.indexOf("INTO [allReadings]\nFROM [eastHub] TIMESTAMP BY eventTime") !== -1);
+
+  const bound = bindToEventstream(definition, "regions");
+  const boundQuery = bound.operators[0]?.properties?.query || "";
+  check("bound default stream named after the Eventstream", bound.streams[0]?.name === "regions-stream");
+  check(
+    "bound default stream keeps every source",
+    bound.streams[0]?.inputNodes?.map(n => n.name).join(",") === "eastHub-source,westHub-source"
+  );
+  check("FROM rewritten to the default stream", /FROM \[regions-stream\] TIMESTAMP BY/.test(boundQuery), boundQuery);
+  check("comment left alone", boundQuery.indexOf("FROM [eastHub] in a comment stays put") !== -1);
+  check("bound node names unique", new Set(nodeNamesOf(bound)).size === nodeNamesOf(bound).length);
+}
+
+console.log("\n== UNION in a WITH step, aggregated downstream ==");
+{
+  const job = {
+    ...unionTwoHubsJob,
+    properties: {
+      ...unionTwoHubsJob.properties,
+      transformation: {
+        name: "Transformation",
+        properties: {
+          query:
+            "WITH merged AS (\n  SELECT * FROM eastHub\n  UNION ALL\n  SELECT * FROM westHub\n)\n" +
+            "SELECT COUNT(*) AS n INTO [allReadings] FROM merged GROUP BY TumblingWindow(minute, 1)"
+        }
+      }
+    }
+  };
+  const plan = buildMigrationPlan(job);
+  const query = plan.eventstreams[0].definition.operators[0]?.properties?.query || "";
+  check("step UNION migrates", plan.assessment.canMigrate, blockedReasons(plan.assessment));
+  check("step UNION collapsed", query.indexOf("westHub") === -1 && /FROM eastHub\s*\)/.test(query), query);
+  check("aggregation kept", query.indexOf("FROM merged GROUP BY TumblingWindow(minute, 1)") !== -1);
+
+  // Reading one merged input on its own would now see the other's events too.
+  const leaky = {
+    ...job,
+    properties: {
+      ...job.properties,
+      transformation: {
+        name: "Transformation",
+        properties: {
+          query:
+            job.properties.transformation.properties.query +
+            "\nSELECT * INTO [allReadings] FROM eastHub WHERE temperature > 50"
+        }
+      }
+    }
+  };
+  const leakyPlan = buildMigrationPlan(leaky);
+  check("partial read of merged inputs blocked", !leakyPlan.assessment.canMigrate);
+  check(
+    "reason names the missing input",
+    findingsOf(leakyPlan.assessment, "multiple inputs", "Blocked").some(f => /not 'westHub'/.test(f.reason))
+  );
+}
+
+console.log("\n== UNION branches that differ per input ==");
+{
+  // Microsoft's own UNION example: each branch timestamps by a different field.
+  const job = {
+    ...unionTwoHubsJob,
+    properties: {
+      ...unionTwoHubsJob.properties,
+      transformation: {
+        name: "Transformation",
+        properties: {
+          query:
+            "SELECT TollId, EntryTime AS Time INTO [allReadings] FROM eastHub TIMESTAMP BY EntryTime\n" +
+            "UNION\nSELECT TollId, ExitTime AS Time FROM westHub TIMESTAMP BY ExitTime"
+        }
+      }
+    }
+  };
+  const plan = buildMigrationPlan(job);
+  check("differing branches blocked", !plan.assessment.canMigrate);
+  check(
+    "reason says the branches differ",
+    findingsOf(plan.assessment, "multiple inputs", "Blocked").some(f => /branches do more than read different inputs/.test(f.reason))
+  );
+  check("not collapsed when blocked", /\bUNION\b/.test(plan.eventstreams[0].definition.operators[0]?.properties?.query));
+
+  // A literal that differs per branch is a real difference, even though masking blanks it.
+  const labelled = {
+    ...job,
+    properties: {
+      ...job.properties,
+      transformation: {
+        name: "Transformation",
+        properties: {
+          query:
+            "SELECT 'east' AS region, * INTO [allReadings] FROM eastHub\n" +
+            "UNION\nSELECT 'west' AS region, * FROM westHub"
+        }
+      }
+    }
+  };
+  check("branches differing only in a string literal blocked", !buildMigrationPlan(labelled).assessment.canMigrate);
+
+  // Aliases differ in name only.
+  const aliased = {
+    ...job,
+    properties: {
+      ...job.properties,
+      transformation: {
+        name: "Transformation",
+        properties: {
+          query:
+            "SELECT e.deviceId INTO [allReadings] FROM eastHub e\nUNION\nSELECT w.deviceId FROM westHub AS w"
+        }
+      }
+    }
+  };
+  const aliasedPlan = buildMigrationPlan(aliased);
+  check("branches differing only in alias merge", aliasedPlan.assessment.canMigrate, blockedReasons(aliasedPlan.assessment));
+}
+
+console.log("\n== separatePipelinesJob: independent inputs become separate Eventstreams ==");
+{
+  const plan = buildMigrationPlan(separatePipelinesJob);
+  const { assessment } = plan;
+
+  check("migratable", assessment.canMigrate, blockedReasons(assessment));
+  check("two Eventstreams", plan.eventstreams.length === 2, String(plan.eventstreams.length));
+  const [orders, clicks] = plan.eventstreams;
+  check("first ingests orders only", orders?.inputs.join(",") === "orders");
+  check("second ingests clicks only", clicks?.inputs.join(",") === "clicks");
+  check("orders writes its outputs", orders?.outputs.join(",") === "ordersOut,auditOut", orders?.outputs.join(","));
+  check("clicks writes its outputs", clicks?.outputs.join(",") === "clicksOut,auditOut", clicks?.outputs.join(","));
+  check("one source each", orders?.definition.sources.length === 1 && clicks?.definition.sources.length === 1);
+
+  const ordersQuery = orders?.definition.operators[0]?.properties?.query || "";
+  const clicksQuery = clicks?.definition.operators[0]?.properties?.query || "";
+  check("orders query keeps its step", /WITH cleanOrders AS \(SELECT \* FROM \[orders\] WHERE amount > 0\)/.test(ordersQuery), ordersQuery);
+  check("orders query drops the clicks step", ordersQuery.indexOf("recentClicks") === -1, ordersQuery);
+  check("orders query keeps its literal", ordersQuery.indexOf("SELECT 'order' AS kind") !== -1);
+  check("orders query drops click statements", ordersQuery.indexOf("'click'") === -1 && ordersQuery.indexOf("clicksOut") === -1);
+  check("clicks query keeps its step as the WITH clause", /^WITH recentClicks AS \(/.test(clicksQuery), clicksQuery);
+  check("clicks query drops orders", clicksQuery.indexOf("orders") === -1 && clicksQuery.indexOf("cleanOrders") === -1, clicksQuery);
+  check("comment kept", clicksQuery.indexOf("-- click stream") !== -1);
+
+  const split = findingsOf(assessment, "multiple inputs").find(f => f.scope === "Job");
+  check("split explained", /2 independent pipelines/.test(split?.reason || ""), split?.reason);
+  check("shared output explained", /'auditout' is written by more than one pipeline/i.test(split?.reason || ""), split?.reason);
+
+  const names = eventstreamNamesFor(plan, "shop");
+  check("Eventstreams named after their input", names.join(",") === "shop-orders,shop-clicks", names.join(","));
+  const bound = bindPlan(plan, "shop");
+  check("each bound to its own default stream", bound[1]?.definition.streams[0]?.name === "shop-clicks-stream");
+  check(
+    "each reads its own default stream",
+    /FROM \[shop-clicks-stream\] WHERE page/.test(bound[1]?.definition.operators[0]?.properties?.query || "")
+  );
+  check("bound node names unique", bound.every(es => duplicateNodeNames(es.definition).length === 0));
+}
+
+console.log("\n== streamJoinJob: JOIN across two stream inputs ==");
+{
+  const plan = buildMigrationPlan(streamJoinJob);
+  check("blocked", !plan.assessment.canMigrate);
+  const join = plan.queryAnalysis.constructs.find(c => c.rule.id === "join-inputs");
+  check("analyzer flags JOIN across inputs", join?.rule.support === "Unsupported");
+  check("JOIN pinpointed to its line", join?.occurrences[0]?.line === 4);
+  check("not reported as a supported stream JOIN", !plan.queryAnalysis.constructs.some(c => c.rule.id === "join-stream"));
+  const finding = plan.assessment.findings.find(f => f.status === "Blocked" && f.asaType === "JOIN across stream inputs");
+  check("blocked finding raised once", Boolean(finding) && findingsOf(plan.assessment, "multiple inputs", "Blocked").length === 0);
+  check("reason says it is unconfirmed, not faked", /not confirmed by Microsoft documentation/.test(finding?.reason || ""));
+  check("merged for review in one Eventstream", plan.eventstreams.length === 1 && plan.eventstreams[0].definition.sources.length === 2);
+
+  // A self-join within one input is still an ordinary, supported stream JOIN.
+  const self = analyzeQuery({
+    ...streamJoinJob,
+    properties: {
+      ...streamJoinJob.properties,
+      transformation: {
+        name: "Transformation",
+        properties: {
+          query:
+            "SELECT * INTO [tripTimes] FROM entries a JOIN entries b ON DATEDIFF(second, a, b) BETWEEN 0 AND 5\n" +
+            "SELECT * INTO [tripTimes] FROM exits"
+        }
+      }
+    }
+  });
+  check("self-join within one input stays supported", self.constructs.some(c => c.rule.id === "join-stream"));
+}
+
+console.log("\n== fanOutJob: one input, several outputs, one unsupported ==");
+{
+  const plan = buildMigrationPlan(fanOutJob);
+  const definition = plan.eventstreams[0].definition;
+  const { assessment } = plan;
+
+  check("one Eventstream", plan.eventstreams.length === 1);
+  check(
+    "supported outputs still become destinations",
+    definition.destinations.map(d => `${d.name}:${d.type}`).join(",") === "hot:Eventhouse,archive:Lakehouse",
+    definition.destinations.map(d => d.name).join(",")
+  );
+  check("all destinations read the one SQL operator", definition.destinations.every(d => d.inputNodes?.[0]?.name === "fanout-job-query"));
+  check("function output blocked", assessment.findings.some(f => f.asaName === "alerts" && f.status === "Blocked" && f.scope === "Output"));
+  check("its INTO flagged as dangling", assessment.findings.some(f => f.asaType === "INTO target" && /'alerts'/.test(f.reason)));
+
+  const unused = assessment.findings.find(f => f.asaName === "debugOut");
+  check("unused output flagged", unused?.status === "Approximated" && /No INTO clause/.test(unused.reason), unused?.reason);
+  check("unused unsupported output does not block", !assessment.findings.some(f => f.asaName === "debugOut" && f.status === "Blocked"));
+  check("unused output gets no destination", !definition.destinations.some(d => d.name === "debugOut"));
+  check("only the unsupported output blocks", assessment.counts.Blocked === 2, blockedReasons(assessment));
+}
+
+console.log("\n== sameNameJob: an input and an output share a name ==");
+{
+  const plan = buildMigrationPlan(sameNameJob);
+  const definition = plan.eventstreams[0].definition;
+
+  check("migratable", plan.assessment.canMigrate, blockedReasons(plan.assessment));
+  check("destination keeps the INTO alias", definition.destinations[0]?.name === "events");
+  check("default stream yields with a suffix", definition.streams[0]?.name === "events-2", definition.streams[0]?.name);
+  check("unbound node names unique", duplicateNodeNames(definition).length === 0, nodeNamesOf(definition).join(","));
+  check("source maps back to the ASA input", asaInputNameOf(sameNameJob, definition.sources[0]?.name) === "events");
+  check("destination maps back to the ASA output", asaOutputNameOf(sameNameJob, definition.destinations[0]?.name) === "events");
+
+  const bound = bindToEventstream(definition, "evts");
+  const boundQuery = bound.operators[0]?.properties?.query;
+  check("FROM rewritten through the suffixed stream", boundQuery === "SELECT * INTO events FROM [evts-stream]", boundQuery);
+  check("operator reads the bound stream", bound.operators[0]?.inputNodes?.[0]?.name === "evts-stream");
+  check("bound node names unique", duplicateNodeNames(bound).length === 0);
+
+  // An Eventstream name that makes "<name>-stream" equal an output is caught.
+  const clash = {
+    ...sameNameJob,
+    properties: {
+      ...sameNameJob.properties,
+      transformation: { name: "Transformation", properties: { query: "SELECT * INTO [evts-stream] FROM events" } },
+      outputs: [kustoOutputFor(sameNameJob, "evts-stream")]
+    }
+  };
+  const clashed = bindToEventstream(buildMigrationPlan(clash).eventstreams[0].definition, "evts");
+  check("default stream / output clash detected", duplicateNodeNames(clashed).indexOf("evts-stream") !== -1);
+
+  // A source suffixed for uniqueness still maps back to its input.
+  check("suffixed source maps back", asaInputNameOf(sameNameJob, "events-source-2") === "events");
+}
+
 console.log("\n== helpers ==");
 {
   check(
@@ -314,7 +613,7 @@ console.log("\n== helpers ==");
   const decoded = Buffer.from(encoded, "base64").toString("utf8");
   check("base64 round-trips multi-byte text", decoded === '{"q":"温度"}', decoded);
 
-  const { definition } = buildMigrationPlan(eventHubToKustoJob);
+  const { eventstreams: [{ definition }] } = buildMigrationPlan(eventHubToKustoJob);
   const request = buildCreateEventstreamRequest("telemetry-job", definition, {
     properties: { retentionTimeInDays: 1, eventThroughputLevel: "Low" }
   });

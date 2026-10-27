@@ -11,7 +11,12 @@ import {
 
 import { WizardStepProps } from "../../../components/Wizard/Wizard";
 import { callDatahubOpen } from "../../../controller/DataHubController";
-import { FabricTargetSelection, asaOutputNameOf, buildMigrationPlan } from "../migration";
+import {
+  FabricTargetSelection,
+  asaOutputNameOf,
+  buildMigrationPlan,
+  planDestinations
+} from "../migration";
 import { asMigratorContext } from "./WizardContext";
 
 /**
@@ -23,7 +28,14 @@ import { asMigratorContext } from "./WizardContext";
  */
 export function TargetsStep({ wizardContext, updateContext }: WizardStepProps) {
   const context = asMigratorContext(wizardContext);
-  const destinations = context.plan?.definition.destinations || [];
+  // An output written by several independent pipelines has a destination in each
+  // of their Eventstreams; one target selection serves them all, so list it once.
+  const destinations = planDestinations(context.plan).filter(
+    (destination, index, all) =>
+      all.findIndex(
+        other => asaOutputNameOf(context.job, other.name) === asaOutputNameOf(context.job, destination.name)
+      ) === index
+  );
 
   function updateTarget(asaOutputName: string, patch: Partial<FabricTargetSelection>): void {
     const existing = context.targets?.[asaOutputName] || {};

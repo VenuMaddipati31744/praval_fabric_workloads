@@ -66,7 +66,8 @@ export function StreamMigratorItemDefaultView({
       subscriptionDisplayName: definition?.subscriptionDisplayName,
       jobResourceId: definition?.jobResourceId,
       eventstreamName: definition?.eventstreamName,
-      alreadyCreatedEventstreamId: definition?.createdEventstreamId,
+      alreadyCreatedEventstreamId:
+        definition?.createdEventstreamIds?.[0] || definition?.createdEventstreamId,
       connections,
       connectionNames,
       targets,

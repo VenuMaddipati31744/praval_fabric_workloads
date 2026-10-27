@@ -14,7 +14,7 @@ import {
 import { WizardStepProps } from "../../../components/Wizard/Wizard";
 import { ConnectionClient } from "../../../clients/ConnectionClient";
 import { Connection } from "../../../clients/FabricPlatformTypes";
-import { buildMigrationPlan } from "../migration";
+import { asaInputNameOf, buildMigrationPlan, planSources } from "../migration";
 import { asMigratorContext } from "./WizardContext";
 import { CreateConnectionDialog } from "./CreateConnectionDialog";
 
@@ -67,8 +67,10 @@ export function ConnectionsStep({ wizardContext, updateContext }: WizardStepProp
     };
   }, [connectionClient]);
 
-  // Only inputs that actually produced a source node need a connection.
-  const sources = context.plan?.definition.sources || [];
+  // Only inputs that actually produced a source node need a connection. A job
+  // split into several Eventstreams has its sources spread across them, but each
+  // ASA input still appears exactly once.
+  const sources = planSources(context.plan);
 
   function assign(asaInputName: string, connectionId: string, displayName: string): void {
     const nextConnections = { ...(context.connections || {}), [asaInputName]: connectionId };
@@ -122,8 +124,9 @@ export function ConnectionsStep({ wizardContext, updateContext }: WizardStepProp
       {busy && <Spinner size="tiny" label="Loading connections..." />}
 
       {sources.map(source => {
-        // Source nodes are named "<input>-source"; recover the ASA input name.
-        const asaInputName = source.name.replace(/-source$/, "");
+        // Source nodes are named "<input>-source", sanitized and possibly
+        // suffixed for uniqueness; recover the ASA input name.
+        const asaInputName = asaInputNameOf(context.job, source.name);
         const selectedId = context.connections?.[asaInputName];
         const selectedName = context.connectionNames?.[asaInputName];
 

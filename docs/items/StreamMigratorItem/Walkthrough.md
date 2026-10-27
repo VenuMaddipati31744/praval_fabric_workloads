@@ -125,7 +125,13 @@ Pick the Azure subscription and the Stream Analytics job. The job's inputs, outp
 
 ### Assessment
 
-The wizard shows what converts directly, what is approximated, and what is blocked. Migration stays disabled while anything is blocked. Common blockers are UDFs, geospatial or anomaly-detection functions, more than one stream input, and outputs with no Eventstream equivalent.
+The wizard shows what converts directly, what is approximated, and what is blocked. Migration stays disabled while anything is blocked. Common blockers are UDFs, a JOIN across two stream inputs, and outputs with no Eventstream equivalent.
+
+Jobs with several stream inputs are handled by what the query does with them, because an Eventstream feeds all of its sources into one default stream:
+
+- Inputs read by separate, independent statements become separate Eventstreams, one per pipeline, named `<name>-<input>`. No statement sees another input's events.
+- Inputs combined by a UNION whose branches differ only in the input they read share one Eventstream. The UNION collapses to a single branch, because the merged default stream already holds every input's events.
+- Anything else that reads several inputs together is blocked: a JOIN across inputs, UNION branches that differ per input, or a statement that reads only some of the merged inputs.
 
 ### Connections
 

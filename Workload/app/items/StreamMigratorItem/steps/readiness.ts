@@ -8,7 +8,14 @@
  */
 
 import { MigratorWizardContext } from "./WizardContext";
-import { asaOutputNameOf } from "../migration";
+import {
+  asaInputNameOf,
+  asaOutputNameOf,
+  bindPlan,
+  duplicateNodeNames,
+  planDestinations,
+  planSources
+} from "../migration";
 
 export interface MigrationReadiness {
   ready: boolean;
@@ -40,15 +47,22 @@ export function getMigrationReadiness(context: MigratorWizardContext): Migration
     problems.push("The Eventstream name cannot contain underscores (_) or dots (.).");
   }
 
-  for (const source of plan.definition.sources) {
-    const asaInputName = source.name.replace(/-source$/, "");
+  for (const source of planSources(plan)) {
+    const asaInputName = asaInputNameOf(context.job, source.name);
     if (!context.connections?.[asaInputName]) {
       problems.push(`Input '${asaInputName}' has no Fabric connection selected.`);
     }
   }
 
-  for (const destination of plan.definition.destinations) {
+  // An output written by several pipelines has a destination in each of their
+  // Eventstreams, all fed from the one target selection, so check it once.
+  const checkedOutputs = new Set<string>();
+  for (const destination of planDestinations(plan)) {
     const asaOutputName = asaOutputNameOf(context.job, destination.name);
+    if (checkedOutputs.has(asaOutputName)) {
+      continue;
+    }
+    checkedOutputs.add(asaOutputName);
     const target = context.targets?.[asaOutputName];
 
     if (!target?.workspaceId || !target?.itemId) {
@@ -65,6 +79,20 @@ export function getMigrationReadiness(context: MigratorWizardContext): Migration
       }
     } else if (destination.type === "Lakehouse" && !target.deltaTable) {
       problems.push(`Output '${asaOutputName}' needs a delta table name.`);
+    }
+  }
+
+  // Binding names the default stream "<name>-stream", which can collide with an
+  // output of the same name. Fabric rejects duplicated node names outright.
+  if (eventstreamName) {
+    for (const bound of bindPlan(plan, eventstreamName)) {
+      const duplicates = duplicateNodeNames(bound.definition);
+      if (duplicates.length > 0) {
+        problems.push(
+          `Eventstream '${bound.displayName}' would contain more than one node named ` +
+            `${duplicates.map(name => `'${name}'`).join(", ")}. Choose a different Eventstream name.`
+        );
+      }
     }
   }
 

@@ -47,7 +47,12 @@ export interface StreamMigratorItemDefinition {
     assessedAt: string;
   };
 
-  /** Set once the Eventstream has actually been created (phase 1d). */
+  /**
+   * Set once the Eventstream has actually been created (phase 1d). For a job
+   * split into several Eventstreams, the first one created.
+   */
   createdEventstreamId?: string;
+  /** Every Eventstream created, in plan order, when the job split into several. */
+  createdEventstreamIds?: string[];
   migratedAt?: string;
 }
