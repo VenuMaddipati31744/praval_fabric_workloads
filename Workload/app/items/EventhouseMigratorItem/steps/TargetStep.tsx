@@ -4,7 +4,7 @@ import { Button, Field, Input, MessageBar, MessageBarBody, Spinner, Text } from 
 import { WizardStepProps } from "../../../components/Wizard/Wizard";
 import { callDatahubOpen } from "../../../controller/DataHubController";
 import { DETAILS_COMMAND, SCHEMA_COMMAND, buildTargetTables } from "../engine";
-import { KustoClient, getKqlDatabase } from "../kusto/KustoClient";
+import { KustoClient, describeError, getKqlDatabase } from "../kusto/KustoClient";
 import { asEhContext } from "./WizardContext";
 
 /** Step 2: the target KQL database in an Eventhouse. */
@@ -46,7 +46,7 @@ export function TargetStep({ wizardContext, updateContext }: WizardStepProps) {
       updateContext("mappings", undefined);
       updateContext("histograms", undefined);
     } catch (caught) {
-      setError(caught?.message || String(caught));
+      setError(describeError(caught));
     } finally {
       setBusy("");
     }

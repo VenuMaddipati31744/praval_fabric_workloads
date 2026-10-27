@@ -7,15 +7,25 @@
 
 import { WorkloadClientAPI } from "@ms-fabric/workload-client";
 import { MigrationTarget } from "../EventhouseMigratorItemDefinition";
-import { SourceTable, TableHistogram, TableMapping, TargetTable, buildMigrationPlan, MigrationPlan } from "../engine";
+import {
+  DatabaseOption,
+  LoadWindow,
+  SourceTable,
+  TableHistogram,
+  TableMapping,
+  TargetTable,
+  buildMigrationPlan,
+  MigrationPlan
+} from "../engine";
 
 export interface EhWizardContext {
   workloadClient: WorkloadClientAPI;
 
   /** Step 1: source ADX database. */
   sourceClusterUri?: string;
-  sourceDatabases?: string[];
+  sourceDatabases?: DatabaseOption[];
   sourceDatabase?: string;
+  sourceDatabaseLabel?: string;
   sourceTables?: SourceTable[];
 
   /** Step 2: target KQL database. */
@@ -25,9 +35,12 @@ export interface EhWizardContext {
   /** Step 3: per source table. */
   mappings?: TableMapping[];
 
-  /** Step 4: day histograms read for the included tables. */
+  /** Step 4: day histograms read for the included tables, within the load window. */
   histograms?: Record<string, TableHistogram>;
   plannedAt?: string;
+  window?: LoadWindow;
+  /** Where the next load starts, when the plan has already copied data. */
+  watermark?: string;
 }
 
 export function asEhContext(context: Record<string, any>): EhWizardContext {
@@ -42,7 +55,7 @@ export const EH_STEP_IDS = {
 };
 
 /** The plan for the current context, or undefined until histograms are read. */
-export function planFromContext(context: EhWizardContext): MigrationPlan | undefined {
+export function planFromContext(context: Partial<EhWizardContext>): MigrationPlan | undefined {
   if (!context.sourceClusterUri || !context.sourceDatabase || !context.mappings || !context.histograms) {
     return undefined;
   }
@@ -54,7 +67,8 @@ export function planFromContext(context: EhWizardContext): MigrationPlan | undef
     {
       sourceClusterUri: context.sourceClusterUri,
       sourceDatabase: context.sourceDatabase,
-      now: context.plannedAt ? new Date(context.plannedAt) : undefined
+      now: context.plannedAt ? new Date(context.plannedAt) : undefined,
+      window: context.window
     }
   );
 }

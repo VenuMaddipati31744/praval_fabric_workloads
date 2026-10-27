@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { WorkloadClientAPI } from "@ms-fabric/workload-client";
 
 import { WizardControl, WizardStep } from "../../components";
-import { EventhouseMigratorItemDefinition } from "./EventhouseMigratorItemDefinition";
+import { MigrationPlanRecord, syncStartOf } from "./EventhouseMigratorItemDefinition";
 import { EH_STEP_IDS, EhWizardContext, asEhContext, planFromContext } from "./steps/WizardContext";
 import { SourceStep } from "./steps/SourceStep";
 import { TargetStep } from "./steps/TargetStep";
@@ -12,7 +12,8 @@ import "./EventhouseMigratorItem.scss";
 
 export interface EventhouseMigratorItemDefaultViewProps {
   workloadClient: WorkloadClientAPI;
-  definition?: EventhouseMigratorItemDefinition;
+  /** The plan being edited; undefined for a new plan. */
+  plan?: MigrationPlanRecord;
   onWizardComplete: (context: EhWizardContext) => void;
   onWizardCancel: () => void;
 }
@@ -20,25 +21,30 @@ export interface EventhouseMigratorItemDefaultViewProps {
 /** Hosts the planning wizard; completing it saves the plan and opens the run view. */
 export function EventhouseMigratorItemDefaultView({
   workloadClient,
-  definition,
+  plan,
   onWizardComplete,
   onWizardCancel
 }: EventhouseMigratorItemDefaultViewProps) {
-  // Rehydrate saved choices so reopening the item doesn't start over.
+  // Rehydrate saved choices so editing a plan doesn't start over.
   const initialContext = useMemo(
     () => ({
       workloadClient,
-      sourceClusterUri: definition?.sourceClusterUri,
-      sourceDatabases: definition?.sourceDatabase ? [definition.sourceDatabase] : undefined,
-      sourceDatabase: definition?.sourceDatabase,
-      sourceTables: definition?.sourceTables,
-      target: definition?.target,
-      targetTables: definition?.targetTables,
-      mappings: definition?.mappings,
-      histograms: definition?.histograms,
-      plannedAt: definition?.plannedAt
+      sourceClusterUri: plan?.sourceClusterUri,
+      sourceDatabases: plan?.sourceDatabase
+        ? [{ name: plan.sourceDatabase, label: plan.sourceDatabaseLabel || plan.sourceDatabase }]
+        : undefined,
+      sourceDatabase: plan?.sourceDatabase,
+      sourceDatabaseLabel: plan?.sourceDatabaseLabel,
+      sourceTables: plan?.sourceTables,
+      target: plan?.target,
+      targetTables: plan?.targetTables,
+      mappings: plan?.mappings,
+      histograms: plan?.histograms,
+      plannedAt: plan?.plannedAt,
+      window: plan?.window,
+      watermark: plan ? syncStartOf(plan) : undefined
     }),
-    [workloadClient, definition]
+    [workloadClient, plan]
   );
 
   const steps: WizardStep[] = [

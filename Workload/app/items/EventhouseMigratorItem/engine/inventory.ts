@@ -3,8 +3,11 @@
  *
  * Reads used:
  *   .show database cslschema   → TableName, Schema ("a:string, ['b c']:long")
- *   .show tables details       → TableName, TotalRowCount, TotalOriginalSize,
- *                                RetentionPolicy, CachingPolicy (JSON strings)
+ *   .show tables details       → TableName, RetentionPolicy, CachingPolicy (JSON strings)
+ *   .show database extents     → row counts and sizes, summarized per table
+ *
+ * Sizes come from the extents rather than `.show tables details`: Fabric serves
+ * cached statistics there, which read 0 for minutes after an ingestion.
  */
 
 import { KustoColumn, SourceTable, TargetTable } from "./model";
@@ -12,6 +15,33 @@ import { timespanToDays } from "./kql";
 
 export const SCHEMA_COMMAND = ".show database cslschema";
 export const DETAILS_COMMAND = ".show tables details";
+export const EXTENT_STATS_COMMAND =
+  ".show database extents | summarize Rows=sum(RowCount), OriginalSize=sum(OriginalSize) by TableName";
+export const DATABASES_COMMAND = ".show databases | project DatabaseName, PrettyName";
+
+export interface DatabaseOption {
+  /** Used in commands. In Fabric this is a GUID. */
+  name: string;
+  /** Shown to people: the pretty name when there is one. */
+  label: string;
+}
+
+export function parseDatabases(rows: { DatabaseName?: unknown; PrettyName?: unknown }[]): DatabaseOption[] {
+  return rows
+    .filter(row => row.DatabaseName)
+    .map(row => {
+      const name = String(row.DatabaseName);
+      const pretty = row.PrettyName ? String(row.PrettyName).trim() : "";
+      return { name, label: pretty || name };
+    })
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+export interface ExtentStatsRow {
+  TableName: string;
+  Rows?: number;
+  OriginalSize?: number;
+}
 
 /** Splits "a:string, ['b, c']:long" on top-level commas, honouring brackets and quotes. */
 export function parseCslSchema(schema: string): KustoColumn[] {
@@ -105,17 +135,24 @@ export interface DetailsRow {
   CachingPolicy?: unknown;
 }
 
-export function buildSourceTables(schemaRows: SchemaRow[], detailRows: DetailsRow[]): SourceTable[] {
+export function buildSourceTables(
+  schemaRows: SchemaRow[],
+  detailRows: DetailsRow[],
+  statsRows: ExtentStatsRow[] = []
+): SourceTable[] {
   const details = new Map(detailRows.map(row => [row.TableName, row]));
+  const stats = new Map(statsRows.map(row => [row.TableName, row]));
   return schemaRows
     .filter(row => row.TableName)
     .map(row => {
       const detail = details.get(row.TableName);
+      const stat = stats.get(row.TableName);
       return {
         name: row.TableName,
         columns: parseCslSchema(row.Schema),
-        rowCount: Number(detail?.TotalRowCount) || 0,
-        originalSizeBytes: Number(detail?.TotalOriginalSize) || 0,
+        // Extents are authoritative; details are a fallback (and may be stale).
+        rowCount: Number(stat?.Rows ?? detail?.TotalRowCount) || 0,
+        originalSizeBytes: Number(stat?.OriginalSize ?? detail?.TotalOriginalSize) || 0,
         retentionDays: retentionDaysOf(detail?.RetentionPolicy),
         cacheDays: cacheDaysOf(detail?.CachingPolicy)
       };
@@ -124,7 +161,7 @@ export function buildSourceTables(schemaRows: SchemaRow[], detailRows: DetailsRo
 }
 
 export function buildTargetTables(schemaRows: SchemaRow[], detailRows: DetailsRow[]): TargetTable[] {
-  return buildSourceTables(schemaRows, detailRows).map(({ name, columns, retentionDays, cacheDays }) => ({
+  return buildSourceTables(schemaRows, detailRows, []).map(({ name, columns, retentionDays, cacheDays }) => ({
     name,
     columns,
     retentionDays,

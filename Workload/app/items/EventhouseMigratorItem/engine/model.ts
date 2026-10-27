@@ -53,12 +53,30 @@ export interface TableMapping {
   caching: PolicyChoice;
 }
 
+/**
+ * The slice of source data one load copies, by when rows arrived in the source
+ * (`ingestion_time()`), not by their timestamp column: (from, to]. The first
+ * load has no `from`; each later sync starts where the previous one ended, so
+ * every row is copied exactly once, including rows that arrive late for a day
+ * that was already copied.
+ */
+export interface LoadWindow {
+  from?: string;
+  to: string;
+}
+
 /** Row counts per UTC day of the timestamp column, read from the source. */
 export interface TableHistogram {
   /** yyyy-MM-dd → rows. */
   days: { day: string; rows: number }[];
   /** Rows whose timestamp is null; they get a bucket of their own. */
   nullRows: number;
+  /**
+   * Rows with no ingestion time (the table's IngestionTime policy was off when
+   * they arrived). Such a table can't be windowed, so it's copied in full once
+   * and left out of incremental syncs.
+   */
+  missingIngestionTime?: number;
 }
 
 export type IssueSeverity = "error" | "warning";
@@ -100,11 +118,15 @@ export interface TablePlan {
   mergeLookbackDays?: number;
   copies: CopyTask[];
   issues: PlanIssue[];
+  /** Whether this table's copies are bounded by the load window (false when rows lack ingestion time). */
+  windowed?: boolean;
 }
 
 export interface MigrationPlan {
   sourceClusterUri: string;
   sourceDatabase: string;
+  /** The ingestion-time window this load copies; undefined for plans made before windows existed. */
+  window?: LoadWindow;
   tables: TablePlan[];
   totals: { tables: number; copies: number; rows: number; estimatedBytes: number };
   /** False when any included table has an error-level issue. */

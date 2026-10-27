@@ -109,7 +109,7 @@ export function TablesStep({ wizardContext, updateContext }: WizardStepProps) {
   return (
     <div className="eh-migrator__step">
       <Text as="p">
-        Every table in <b>{context.sourceDatabase}</b>. Data is copied one day at a time on the timestamp column, and
+        Every table in <b>{context.sourceDatabaseLabel || context.sourceDatabase}</b>. Data is copied one day at a time on the timestamp column, and
         each day's extents are stamped with that day as their creation time, so retention and the hot cache treat the
         data by its real age.
       </Text>

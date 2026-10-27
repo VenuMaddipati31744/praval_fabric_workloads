@@ -21,6 +21,7 @@ import {
   mergeLookbackCommand,
   normalizeClusterUri,
   parseCslSchema,
+  parseDatabases,
   parseHistogram,
   restoreMergeCommand,
   retentionDaysOf,
@@ -97,6 +98,22 @@ console.log("\n== inventory parsing ==");
   );
   check("tables sorted", tables[0].name === "A");
   check("inherited policy is undefined", tables[0].retentionDays === undefined);
+
+  // Fabric's .show tables details can report 0 right after an ingestion; extents are authoritative.
+  const fresh = buildSourceTables(
+    [{ TableName: "T", Schema: "t:datetime" }],
+    [{ TableName: "T", TotalRowCount: 0, TotalOriginalSize: 0, RetentionPolicy: '{"SoftDeletePeriod":"36500.00:00:00"}' }],
+    [{ TableName: "T", Rows: 12600, OriginalSize: 2234400 }]
+  );
+  check("extent stats win over stale details", fresh[0].rowCount === 12600 && fresh[0].originalSizeBytes === 2234400);
+  check("policies still from details", fresh[0].retentionDays === 36500);
+
+  const dbs = parseDatabases([
+    { DatabaseName: "156759fc-615a-44bf-b865-525f340563fb", PrettyName: "target" },
+    { DatabaseName: "telemetry", PrettyName: "" }
+  ]);
+  check("pretty name shown, GUID kept for commands", dbs.some(d => d.label === "target" && d.name === "156759fc-615a-44bf-b865-525f340563fb"));
+  check("falls back to the name", dbs.some(d => d.label === "telemetry" && d.name === "telemetry"));
 }
 
 console.log("\n== default mapping ==");
@@ -203,6 +220,34 @@ console.log("\n== guards ==");
   const excluded = { ...defaultMapping(events, []), include: false };
   check("nothing included is not ready", !buildMigrationPlan([excluded], [events], [], {}, context).ready);
   check("histogram query", histogramQuery("Events", "Timestamp").indexOf(`format_datetime(bin(['Timestamp'], 1d), "yyyy-MM-dd")`) !== -1);
+}
+
+console.log("\n== incremental loads (ingestion-time windows) ==");
+{
+  const mapping = defaultMapping(events, []);
+  const h = parseHistogram([{ day: "2025-01-01", rows: 5 }]);
+  const first = buildMigrationPlan([mapping], [events], [], { Events: h }, { ...context, window: { to: "2026-10-27T07:00:00Z" } });
+  const firstCmd = first.tables[0].copies[0].command;
+  check("first load bounded above only", /where ingestion_time\(\) <= datetime\(2026-10-27T07:00:00\.000Z\)/.test(firstCmd) && firstCmd.indexOf("ingestion_time() >") === -1, firstCmd);
+  check("window in tag", first.tables[0].copies[0].tag === "ssmig:Events:2025-01-01@20261027070000");
+  check("plan carries window", first.window?.to === "2026-10-27T07:00:00Z");
+
+  const delta = buildMigrationPlan([mapping], [events], [], { Events: h }, {
+    ...context,
+    window: { from: "2026-10-27T07:00:00Z", to: "2026-10-30T09:30:00Z" }
+  });
+  const deltaCopy = delta.tables[0].copies[0];
+  check("delta bounded both sides", /ingestion_time\(\) > datetime\(2026-10-27T07:00:00\.000Z\) and ingestion_time\(\) <= datetime\(2026-10-30T09:30:00\.000Z\)/.test(deltaCopy.command), deltaCopy.command);
+  check("late rows for an old day keep that day's creation time", deltaCopy.creationTime === "2025-01-01T23:59:59.9999999Z");
+  check("delta tag differs from the first load's", deltaCopy.tag !== first.tables[0].copies[0].tag);
+  check("delta histogram windowed", histogramQuery("Events", "Timestamp", { from: "2026-10-27T07:00:00Z", to: "2026-10-30T09:30:00Z" }).indexOf("ingestion_time() > ") !== -1);
+
+  const noIt = { ...h, missingIngestionTime: 3 };
+  const fullFirst = buildMigrationPlan([mapping], [events], [], { Events: noIt }, { ...context, window: { to: "2026-10-27T07:00:00Z" } });
+  check("no ingestion time: first load copies in full", fullFirst.tables[0].copies[0].command.indexOf("ingestion_time()") === -1 && fullFirst.ready);
+  check("no ingestion time: warned", fullFirst.tables[0].issues.some(i => /copied in full/.test(i.message)));
+  const skipped = buildMigrationPlan([mapping], [events], [], { Events: noIt }, { ...context, window: { from: "2026-10-27T07:00:00Z", to: "2026-10-30T09:30:00Z" } });
+  check("no ingestion time: delta skips the table", skipped.tables[0].copies.length === 0 && skipped.tables[0].issues.some(i => /can't be synced incrementally/.test(i.message)));
 }
 
 console.log("\n== verification ==");

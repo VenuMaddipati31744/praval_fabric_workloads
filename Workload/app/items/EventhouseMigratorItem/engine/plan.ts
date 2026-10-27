@@ -21,7 +21,8 @@ import {
   TableHistogram,
   TableMapping,
   TablePlan,
-  TargetTable
+  TargetTable,
+  LoadWindow
 } from "./model";
 import { kqlDatetime, kqlName, kqlString, kqlVerbatim } from "./kql";
 
@@ -163,8 +164,31 @@ export function endOfDay(day: string): string {
   return `${day}T23:59:59.9999999Z`;
 }
 
-export function copyTag(targetTable: string, day: string | undefined): string {
-  return `ssmig:${targetTable}:${day || "null"}`;
+/**
+ * The ingest-by tag of one copy. It includes the load window, so a sync that
+ * copies late rows for an already-copied day isn't blocked by that day's
+ * earlier tag through ingestIfNotExists.
+ */
+export function copyTag(targetTable: string, day: string | undefined, window?: LoadWindow): string {
+  const base = `ssmig:${targetTable}:${day || "null"}`;
+  return window ? `${base}@${window.to.replace(/[^0-9]/g, "").slice(0, 14)}` : base;
+}
+
+/** `ingestion_time()` bounds of a load window, as a KQL predicate. */
+export function windowPredicate(window: LoadWindow | undefined): string | undefined {
+  if (!window) {
+    return undefined;
+  }
+  const upper = `ingestion_time() <= ${kqlDatetime(window.to)}`;
+  return window.from ? `ingestion_time() > ${kqlDatetime(window.from)} and ${upper}` : upper;
+}
+
+/** The source cluster's clock, read just before planning a load: the window's upper bound. */
+export const WATERMARK_QUERY = "print Now=now()";
+
+/** Rows the window filter can't see because they carry no ingestion time. */
+export function missingIngestionTimeQuery(table: string): string {
+  return `${kqlName(table)}\n| summarize Missing=countif(isnull(ingestion_time()))`;
 }
 
 function daysBetween(fromDay: string, now: Date): number {
@@ -176,6 +200,8 @@ export interface PlanContext {
   sourceClusterUri: string;
   sourceDatabase: string;
   now?: Date;
+  /** The ingestion-time window this load copies. */
+  window?: LoadWindow;
 }
 
 export function buildTablePlan(
@@ -193,6 +219,28 @@ export function buildTablePlan(
   if (!histogram) {
     issues.push({ severity: "error", table: source.name, message: "The day histogram hasn't been read yet." });
     return plan;
+  }
+
+  // A window can only be applied when every row carries an ingestion time.
+  let window = context.window;
+  if (window && histogram.missingIngestionTime) {
+    if (window.from) {
+      issues.push({
+        severity: "warning",
+        table: source.name,
+        message: `${histogram.missingIngestionTime} row(s) have no ingestion time (the IngestionTime policy was off), ` +
+          "so this table can't be synced incrementally and is skipped. Enable the policy on the source table, " +
+          "or re-copy it into an empty table."
+      });
+      return plan;
+    }
+    issues.push({
+      severity: "warning",
+      table: source.name,
+      message: `${histogram.missingIngestionTime} row(s) have no ingestion time, so this table is copied in full ` +
+        "and later syncs will skip it."
+    });
+    window = undefined;
   }
 
   const t = kqlName(mapping.targetTable);
@@ -217,8 +265,10 @@ export function buildTablePlan(
   const from = `cluster(${kqlString(context.sourceClusterUri)}).database(${kqlString(context.sourceDatabase)}).${kqlName(source.name)}`;
   const ts = kqlName(mapping.timestampColumn as string);
 
+  const inWindow = windowPredicate(window);
+  plan.windowed = Boolean(window);
   const copy = (day: string | undefined, rows: number) => {
-    const tag = copyTag(mapping.targetTable, day);
+    const tag = copyTag(mapping.targetTable, day, window);
     const estimatedBytes = Math.round(rows * avgRowBytes);
     const props = [
       day ? `creationTime=${kqlString(endOfDay(day))}` : undefined,
@@ -229,7 +279,9 @@ export function buildTablePlan(
     const filter = day
       ? `where ${ts} >= ${kqlDatetime(`${day}T00:00:00Z`)} and ${ts} < ${kqlDatetime(`${nextDay(day)}T00:00:00Z`)}`
       : `where isnull(${ts})`;
-    const command = `.set-or-append async ${t} with (${props}) <|\n${from}\n| ${filter}${shape ? `\n| ${shape}` : ""}`;
+    const command =
+      `.set-or-append async ${t} with (${props}) <|\n${from}\n| ${filter}` +
+      `${inWindow ? `\n| where ${inWindow}` : ""}${shape ? `\n| ${shape}` : ""}`;
     plan.copies.push({
       id: tag,
       sourceTable: source.name,
@@ -300,6 +352,7 @@ export function buildMigrationPlan(
   return {
     sourceClusterUri: context.sourceClusterUri,
     sourceDatabase: context.sourceDatabase,
+    window: context.window,
     tables,
     totals: {
       tables: tables.length,
@@ -333,9 +386,11 @@ export function restoreMergeCommand(table: string, originalPolicyJson: string | 
 // ---- reads ----------------------------------------------------------------
 
 /** Rows per UTC day of the timestamp column; null timestamps reported with an empty day. */
-export function histogramQuery(table: string, timestampColumn: string): string {
+export function histogramQuery(table: string, timestampColumn: string, window?: LoadWindow): string {
   const ts = kqlName(timestampColumn);
-  return `${kqlName(table)}\n| summarize rows=count() by day=iff(isnull(${ts}), "", format_datetime(bin(${ts}, 1d), "yyyy-MM-dd"))`;
+  const inWindow = windowPredicate(window);
+  return `${kqlName(table)}${inWindow ? `\n| where ${inWindow}` : ""}\n` +
+    `| summarize rows=count() by day=iff(isnull(${ts}), "", format_datetime(bin(${ts}, 1d), "yyyy-MM-dd"))`;
 }
 
 /** Creation-time histogram of a table's extents, to prove the extents were rebuilt. */

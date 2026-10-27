@@ -13,6 +13,8 @@ import { callAcquireFrontendAccessToken } from "../../../controller/Authenticati
 import { EnvironmentConstants } from "../../../constants";
 
 const FABRIC_KQL_SCOPE = "https://api.fabric.microsoft.com/KQLDatabase.ReadWrite.All";
+/** Fallback when a cluster's auth metadata can't be read; what Fabric and most ADX clusters report. */
+const DEFAULT_KUSTO_RESOURCE = "https://kusto.kusto.windows.net";
 
 export type KustoRow = Record<string, any>;
 
@@ -20,6 +22,57 @@ export class KustoRequestError extends Error {
   constructor(message: string, readonly status?: number, readonly clientRequestId?: string) {
     super(message);
   }
+}
+
+/**
+ * A readable message from anything thrown. The workload SDK rejects with plain
+ * objects rather than Errors, so `String(error)` would print "[object Object]".
+ */
+export function describeError(error: unknown): string {
+  if (!error) {
+    return "Unknown error";
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  const e = error as any;
+  const candidates = [
+    e.message,
+    e.error?.message,
+    e.error_description,
+    e.errorMessage,
+    typeof e.error === "string" ? e.error : undefined,
+    e.statusText
+  ];
+  const message = candidates.find(value => typeof value === "string" && value.trim());
+  if (message) {
+    return message;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+const resourceIds = new Map<string, Promise<string>>();
+
+/**
+ * The Entra resource a cluster expects tokens for. It is not the cluster URI:
+ * Fabric Eventhouses, for one, report https://kusto.kusto.windows.net. Every
+ * cluster publishes it, unauthenticated, at /v1/rest/auth/metadata.
+ */
+function kustoResourceId(clusterUri: string): Promise<string> {
+  if (!resourceIds.has(clusterUri)) {
+    resourceIds.set(
+      clusterUri,
+      fetch(`${clusterUri}/v1/rest/auth/metadata`)
+        .then(response => (response.ok ? response.json() : undefined))
+        .then(metadata => String(metadata?.AzureAD?.KustoServiceResourceId || DEFAULT_KUSTO_RESOURCE).replace(/\/+$/, ""))
+        .catch(() => DEFAULT_KUSTO_RESOURCE)
+    );
+  }
+  return resourceIds.get(clusterUri) as Promise<string>;
 }
 
 interface V1Response {
@@ -58,10 +111,17 @@ export class KustoClient {
   }
 
   private async token(): Promise<string> {
-    const resource = `${this.clusterUri}/user_impersonation`;
-    const scopes = this.clusterUri.includes(".fabric.microsoft.com") ? `${FABRIC_KQL_SCOPE} ${resource}` : resource;
-    const token = await callAcquireFrontendAccessToken(this.workloadClient, scopes);
-    return token.token;
+    // One resource per token request: Entra rejects scopes that span resources.
+    const scope = `${await kustoResourceId(this.clusterUri)}/user_impersonation`;
+    try {
+      const token = await callAcquireFrontendAccessToken(this.workloadClient, scope);
+      return token.token;
+    } catch (error) {
+      throw new KustoRequestError(
+        `Couldn't get a sign-in token for ${scope}: ${describeError(error)}. The workload's Entra app needs the ` +
+          "Azure Data Explorer 'user_impersonation' API permission, with consent."
+      );
+    }
   }
 
   private async post(path: string, database: string, csl: string): Promise<KustoRow[]> {

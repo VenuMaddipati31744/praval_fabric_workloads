@@ -5,6 +5,8 @@
 
 import { MigrationRunner, RunState, emptyRunState } from "./MigrationRunner";
 import { buildMigrationPlan, defaultMapping, parseHistogram, SourceTable } from "../engine";
+import { normalizeDefinition } from "../EventhouseMigratorItemDefinition";
+import { analyzeLoad } from "./analyzeLoad";
 
 let failures = 0;
 let checks = 0;
@@ -129,6 +131,65 @@ async function main() {
     check("run failed", final.phase === "failed");
     check("each day tried maxAttempts times", Object.values(final.copies).every(c => c.attempts === 2 && c.status === "failed"));
     check("merge restored anyway", commands.some(c => c === ".delete table ['Events'] policy merge") && !final.mergeWidened.Events);
+  }
+
+  console.log("\n== incremental sync ==");
+  {
+    // analyzeLoad: watermark from the source clock, windowed histograms, ingestion-time fallback.
+    const seen: string[] = [];
+    const source: any = {
+      async query(_db: string, csl: string) {
+        seen.push(csl);
+        if (csl.startsWith("print")) {
+          return [{ Now: "2026-10-30T09:30:00Z" }];
+        }
+        if (csl.indexOf("Missing=") !== -1) {
+          return [{ Missing: csl.indexOf("['Legacy']") !== -1 ? 4 : 0 }];
+        }
+        return [{ day: "2026-10-29", rows: 7 }];
+      }
+    };
+    const legacyTable = { ...defaultMapping({ ...events, name: "Legacy" }, []) };
+    const delta = await analyzeLoad(source, "src", [defaultMapping(events, []), legacyTable], "2026-10-27T07:00:00.000Z");
+    check("window runs from the watermark to the source clock", delta.window.from === "2026-10-27T07:00:00.000Z" && delta.window.to === "2026-10-30T09:30:00.000Z");
+    check("delta histogram windowed", seen.some(c => c.indexOf("['Events']") !== -1 && c.indexOf("ingestion_time() > ") !== -1));
+    check("tables without ingestion time don't count toward a delta", delta.rows === 7);
+
+    const first = await analyzeLoad(source, "src", [legacyTable], undefined);
+    check("first load reads such a table in full", first.rows === 7 && seen.filter(c => c.indexOf("['Legacy']") !== -1 && c.indexOf("summarize rows") !== -1).pop()?.indexOf("ingestion_time()") === -1);
+
+    // Verification on a sync compares the source up to the watermark with the whole target.
+    const deltaPlan = buildMigrationPlan([defaultMapping(events, [])], [events], [], { Events: parseHistogram([{ day: "2026-10-29", rows: 7 }]) }, {
+      sourceClusterUri: "https://adx1.kusto.windows.net",
+      sourceDatabase: "src",
+      now: new Date("2026-10-30T10:00:00Z"),
+      window: { from: "2026-10-27T07:00:00Z", to: "2026-10-30T09:30:00Z" }
+    });
+    const verifySeen: string[] = [];
+    const verifySource: any = { async query(_db: string, csl: string) { verifySeen.push(csl); return [{ day: "2026-10-29", rows: 7 }]; } };
+    const { client } = fakeTarget();
+    const final = await new MigrationRunner(deltaPlan, undefined, {
+      source: verifySource, target: client, targetDatabase: "tgt", pollIntervalMs: 1, onState: () => undefined
+    }).run();
+    check("sync run done", final.phase === "done");
+    check("verification is cumulative up to the watermark", verifySeen.some(c => /ingestion_time\(\) <= datetime\(2026-10-30T09:30:00\.000Z\)/.test(c) && c.indexOf("ingestion_time() >") === -1));
+  }
+
+  console.log("\n== saved items from before plans became a list ==");
+  {
+    const legacy: any = {
+      sourceClusterUri: "https://src.kusto.windows.net",
+      sourceDatabase: "db",
+      mappings: [],
+      plannedAt: "2026-10-27T07:00:00Z",
+      run: { ...emptyRunState(), phase: "done", finishedAt: "2026-10-27T07:12:21Z" }
+    };
+    const normalized = normalizeDefinition(legacy);
+    check("legacy plan kept as first plan", normalized.plans?.length === 1 && normalized.plans[0].sourceDatabase === "db");
+    check("legacy run kept", normalized.plans?.[0].run?.phase === "done");
+    check("legacy plan is active", normalized.activePlanId === normalized.plans?.[0].id);
+    check("new shape passes through", normalizeDefinition({ plans: [], activePlanId: undefined }).plans?.length === 0);
+    check("empty item has no plans", normalizeDefinition(undefined).plans?.length === 0);
   }
 
   console.log(`\n${checks - failures}/${checks} checks passed`);

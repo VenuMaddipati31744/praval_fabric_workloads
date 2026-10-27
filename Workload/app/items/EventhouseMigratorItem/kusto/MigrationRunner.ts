@@ -21,7 +21,7 @@ import {
   parseHistogram,
   restoreMergeCommand
 } from "../engine";
-import { KustoClient, getOperationStatus } from "./KustoClient";
+import { KustoClient, describeError, getOperationStatus } from "./KustoClient";
 
 export type CopyStatus = "pending" | "running" | "done" | "failed";
 
@@ -119,7 +119,7 @@ export class MigrationRunner {
       failed = !(await this.copyAll());
     } catch (error) {
       failed = true;
-      this.log("error", error?.message || String(error));
+      this.log("error", describeError(error));
     } finally {
       // Always put merge policies back, even after a failure or a stop.
       this.emit({ phase: "restoring" });
@@ -142,7 +142,7 @@ export class MigrationRunner {
       this.emit({ phase: "done", finishedAt: new Date().toISOString() });
       this.log("info", "Migration complete.");
     } catch (error) {
-      this.log("error", `Verification failed: ${error?.message || error}`);
+      this.log("error", `Verification failed: ${describeError(error)}`);
       this.emit({ phase: "failed", finishedAt: new Date().toISOString() });
     }
     return this.state;
@@ -190,7 +190,7 @@ export class MigrationRunner {
         this.emit({ mergeWidened: { ...this.state.mergeWidened, [name]: false } });
         this.log("info", `${name}: merge policy restored`);
       } catch (error) {
-        this.log("error", `${name}: could not restore the merge policy: ${error?.message || error}`);
+        this.log("error", `${name}: could not restore the merge policy: ${describeError(error)}`);
       }
     }
   }
@@ -229,7 +229,7 @@ export class MigrationRunner {
               this.setCopy(copy.id, { status: "failed", operationId: undefined, error: outcome.message });
             }
           } catch (error) {
-            this.setCopy(copy.id, { status: "failed", operationId: undefined, error: error?.message || String(error) });
+            this.setCopy(copy.id, { status: "failed", operationId: undefined, error: describeError(error) });
           }
           progress = this.state.copies[copy.id];
           if (progress.status === "failed" && progress.attempts < maxAttempts) {
@@ -269,8 +269,11 @@ export class MigrationRunner {
     const results: TableVerification[] = [];
     for (const table of this.plan.tables) {
       const { sourceTable, targetTable, timestampColumn } = table.mapping;
+      // Cumulative check: everything the source held up to this load's watermark
+      // must now be in the target, whichever load copied it.
+      const upTo = table.windowed && this.plan.window ? { to: this.plan.window.to } : undefined;
       const [sourceRows, targetRows, extents] = await Promise.all([
-        this.options.source.query(this.plan.sourceDatabase, histogramQuery(sourceTable, timestampColumn as string)),
+        this.options.source.query(this.plan.sourceDatabase, histogramQuery(sourceTable, timestampColumn as string, upTo)),
         this.options.target.query(this.options.targetDatabase, histogramQuery(targetTable, timestampColumn as string)),
         this.mgmt(`.show table ${kqlName(targetTable)} extents | summarize by bin(MaxCreatedOn, 1d) | count`)
       ]);

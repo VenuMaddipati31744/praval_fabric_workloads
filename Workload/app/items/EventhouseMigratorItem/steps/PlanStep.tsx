@@ -14,16 +14,15 @@ import {
 } from "@fluentui/react-components";
 
 import { WizardStepProps } from "../../../components/Wizard/Wizard";
-import { TableHistogram, histogramQuery, parseHistogram } from "../engine";
-import { KustoClient } from "../kusto/KustoClient";
+import { KustoClient, describeError } from "../kusto/KustoClient";
+import { analyzeLoad } from "../kusto/analyzeLoad";
 import { asEhContext, planFromContext } from "./WizardContext";
 import { formatBytes } from "./SourceStep";
 
-const READ_CONCURRENCY = 3;
-
 /**
  * Step 4: read how many rows each selected table has per day, then show the
- * exact commands the migration will run.
+ * exact commands the migration will run. On a plan that has already copied
+ * data, only rows that arrived since its watermark are planned.
  */
 export function PlanStep({ wizardContext, updateContext }: WizardStepProps) {
   const context = asEhContext(wizardContext);
@@ -35,25 +34,16 @@ export function PlanStep({ wizardContext, updateContext }: WizardStepProps) {
   async function analyze() {
     setError("");
     const client = new KustoClient(context.workloadClient, context.sourceClusterUri as string);
-    const histograms: Record<string, TableHistogram> = {};
-    const queue = [...included];
-    let done = 0;
     setBusy(`Reading daily row counts (0/${included.length})...`);
     try {
-      await Promise.all(
-        Array.from({ length: READ_CONCURRENCY }, async () => {
-          while (queue.length) {
-            const mapping = queue.shift();
-            const rows = await client.query(context.sourceDatabase as string, histogramQuery(mapping.sourceTable, mapping.timestampColumn as string));
-            histograms[mapping.sourceTable] = parseHistogram(rows as any);
-            setBusy(`Reading daily row counts (${++done}/${included.length})...`);
-          }
-        })
+      const analysis = await analyzeLoad(client, context.sourceDatabase as string, included, context.watermark, (done, total) =>
+        setBusy(`Reading daily row counts (${done}/${total})...`)
       );
-      updateContext("histograms", histograms);
+      updateContext("histograms", analysis.histograms);
+      updateContext("window", analysis.window);
       updateContext("plannedAt", new Date().toISOString());
     } catch (caught) {
-      setError(caught?.message || String(caught));
+      setError(describeError(caught));
     } finally {
       setBusy("");
     }
@@ -87,6 +77,15 @@ export function PlanStep({ wizardContext, updateContext }: WizardStepProps) {
               <MessageBarTitle>{plan.ready ? "Ready to migrate" : "Resolve the errors below first"}</MessageBarTitle>
               {`${plan.totals.tables} table(s) · ${plan.totals.copies} daily copies · ` +
                 `${plan.totals.rows.toLocaleString()} rows · ~${formatBytes(plan.totals.estimatedBytes)}`}
+              {plan.window && (
+                <div className="eh-migrator__muted">
+                  {plan.window.from
+                    ? `Incremental: rows that arrived in the source after ${new Date(plan.window.from).toLocaleString()} ` +
+                      `and up to ${new Date(plan.window.to).toLocaleString()}.`
+                    : `Everything that arrived in the source up to ${new Date(plan.window.to).toLocaleString()}. ` +
+                      "Later syncs copy only what arrives after that."}
+                </div>
+              )}
             </MessageBarBody>
           </MessageBar>
           <MessageBar intent="warning">

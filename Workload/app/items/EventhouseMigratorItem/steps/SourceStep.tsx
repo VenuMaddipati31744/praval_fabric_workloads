@@ -13,8 +13,16 @@ import {
 } from "@fluentui/react-components";
 
 import { WizardStepProps } from "../../../components/Wizard/Wizard";
-import { DETAILS_COMMAND, SCHEMA_COMMAND, buildSourceTables, normalizeClusterUri } from "../engine";
-import { KustoClient } from "../kusto/KustoClient";
+import {
+  DATABASES_COMMAND,
+  DETAILS_COMMAND,
+  EXTENT_STATS_COMMAND,
+  SCHEMA_COMMAND,
+  buildSourceTables,
+  normalizeClusterUri,
+  parseDatabases
+} from "../engine";
+import { KustoClient, describeError } from "../kusto/KustoClient";
 import { asEhContext } from "./WizardContext";
 
 function formatBytes(bytes: number): string {
@@ -41,7 +49,7 @@ export function SourceStep({ wizardContext, updateContext }: WizardStepProps) {
     try {
       await action();
     } catch (caught) {
-      setError(caught?.message || String(caught));
+      setError(describeError(caught));
     } finally {
       setBusy("");
     }
@@ -51,10 +59,11 @@ export function SourceStep({ wizardContext, updateContext }: WizardStepProps) {
     attempt("Connecting...", async () => {
       const clusterUri = normalizeClusterUri(uri);
       setUri(clusterUri);
-      const rows = await new KustoClient(context.workloadClient, clusterUri).mgmt("NetDefaultDB", ".show databases");
+      const rows = await new KustoClient(context.workloadClient, clusterUri).mgmt("NetDefaultDB", DATABASES_COMMAND);
       updateContext("sourceClusterUri", clusterUri);
-      updateContext("sourceDatabases", rows.map(row => String(row.DatabaseName)).filter(Boolean).sort());
+      updateContext("sourceDatabases", parseDatabases(rows));
       updateContext("sourceDatabase", undefined);
+      updateContext("sourceDatabaseLabel", undefined);
       updateContext("sourceTables", undefined);
       updateContext("mappings", undefined);
       updateContext("histograms", undefined);
@@ -63,9 +72,14 @@ export function SourceStep({ wizardContext, updateContext }: WizardStepProps) {
   const selectDatabase = (database: string) =>
     attempt("Reading tables...", async () => {
       const client = new KustoClient(context.workloadClient, context.sourceClusterUri as string);
-      const [schema, details] = await Promise.all([client.mgmt(database, SCHEMA_COMMAND), client.mgmt(database, DETAILS_COMMAND)]);
+      const [schema, details, stats] = await Promise.all([
+        client.mgmt(database, SCHEMA_COMMAND),
+        client.mgmt(database, DETAILS_COMMAND),
+        client.mgmt(database, EXTENT_STATS_COMMAND)
+      ]);
       updateContext("sourceDatabase", database);
-      updateContext("sourceTables", buildSourceTables(schema as any, details as any));
+      updateContext("sourceDatabaseLabel", context.sourceDatabases?.find(d => d.name === database)?.label || database);
+      updateContext("sourceTables", buildSourceTables(schema as any, details as any, stats as any));
       updateContext("mappings", undefined);
       updateContext("histograms", undefined);
     });
@@ -94,13 +108,19 @@ export function SourceStep({ wizardContext, updateContext }: WizardStepProps) {
         <Field label="Database" className="eh-migrator__field" required>
           <Dropdown
             placeholder="Select a database"
-            value={context.sourceDatabase || ""}
+            value={context.sourceDatabaseLabel || context.sourceDatabase || ""}
             selectedOptions={context.sourceDatabase ? [context.sourceDatabase] : []}
             disabled={Boolean(busy)}
             onOptionSelect={(_, data) => data.optionValue && selectDatabase(data.optionValue)}
           >
-            {context.sourceDatabases.map(name => (
-              <Option key={name} value={name}>{name}</Option>
+            {context.sourceDatabases.map(db => (
+              <Option key={db.name} value={db.name} text={db.label}>
+                {db.label === db.name ? db.label : (
+                  <span>
+                    {db.label} <span className="eh-migrator__muted">{db.name}</span>
+                  </span>
+                )}
+              </Option>
             ))}
           </Dropdown>
         </Field>
